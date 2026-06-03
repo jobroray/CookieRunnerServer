@@ -212,76 +212,6 @@ app.post('/api/customer', async (req, res) => {
     }
 });
 
-app.get('/api/available-pickup-times', async (req, res) => {
-    try {
-        const now = new Date();
-        
-        // Minimum prep time: 20 minutes from now
-        const minPickupTime = new Date(now.getTime() + 20 * 60 * 1000);
-        
-        // Round up to next 15-minute interval
-        const minutes = minPickupTime.getMinutes();
-        const roundedMinutes = Math.ceil(minutes / 15) * 15;
-        minPickupTime.setMinutes(roundedMinutes, 0, 0);
-        
-        const timeSlots = [];
-        const businessHourStart = 7;  // 7 AM
-        const businessHourEnd = 21;   // 9 PM
-        const maxSlotsToShow = 40;    // Show up to 40 time slots
-        const maxDaysAhead = 7;       // Allow ordering up to 7 days in advance
-        
-        let currentSlot = new Date(minPickupTime);
-        let slotsAdded = 0;
-        let daysChecked = 0;
-        
-        // Keep generating slots until we have enough or hit the max days limit
-        while (slotsAdded < maxSlotsToShow && daysChecked < maxDaysAhead) {
-            const hour = currentSlot.getHours();
-            const currentDay = currentSlot.getDate();
-            
-            // Check if this slot is during business hours
-            if (hour >= businessHourStart && hour < businessHourEnd) {
-                timeSlots.push(currentSlot.toISOString());
-                slotsAdded++;
-            }
-            
-            // Move to next 15-minute slot
-            currentSlot = new Date(currentSlot.getTime() + 15 * 60 * 1000);
-            
-            // If we've moved past closing time, jump to opening time next day
-            if (currentSlot.getHours() >= businessHourEnd || currentSlot.getHours() < businessHourStart) {
-                // Set to next day at opening time
-                currentSlot.setDate(currentSlot.getDate() + 1);
-                currentSlot.setHours(businessHourStart, 0, 0, 0);
-                daysChecked++;
-            }
-        }
-        
-        console.log(`📅 Generated ${timeSlots.length} pickup times spanning ${daysChecked + 1} days`);
-        if (timeSlots.length > 0) {
-            console.log(`   First slot: ${timeSlots[0]}`);
-            console.log(`   Last slot: ${timeSlots[timeSlots.length - 1]}`);
-        }
-        
-        res.json({ 
-            pickupTimes: timeSlots,
-            businessHours: {
-                start: businessHourStart,
-                end: businessHourEnd
-            },
-            allowPreorder: true,
-            maxDaysAhead: maxDaysAhead
-        });
-        
-    } catch (error) {
-        console.error('Error generating pickup times:', error);
-        res.status(500).json({ 
-            error: 'Failed to generate pickup times',
-            details: error.message 
-        });
-    }
-});
-
 app.get('/api/orders/active', async (req, res) => {
     try {
         const customerId = req.query.customerId;
@@ -417,69 +347,53 @@ app.get('/api/orders/past', async (req, res) => {
         });
     }
 });
-app.post('/api/process-payment', async (req, res) => {
-    const { nonce, amount, customerId, customerEmail, pickupAt } = req.body;
-    
+// AVAILABLE PICKUP TIMES ENDPOINT - No Business Hours Restrictions
+app.get('/api/available-pickup-times', async (req, res) => {
     try {
-        // Step 1: Create order
-        const orderResult = await squareClient.ordersApi.createOrder({
-            idempotencyKey: require('crypto').randomUUID(),
-            order: {
-                locationId: process.env.SQUARE_LOCATION_ID,
-                customerId: customerId,
-                state: 'OPEN', 
-                lineItems: [
-                    {
-                        name: 'Cookie Order',
-                        quantity: '1',
-                        basePriceMoney: {
-                            amount: Math.round(amount * 100),
-                            currency: 'USD'
-                        }
-                    }
-                ],
-                fulfillments: [
-                    {
-                        type: 'PICKUP',
-                        state: 'PROPOSED',
-                        pickupDetails: {
-                            // Use scheduled pickup time if provided
-                            scheduleType: pickupAt ? 'SCHEDULED' : 'ASAP',
-                            pickupAt: pickupAt || undefined,
-                            prepTimeDuration: 'PT15M', 
-                            recipient: {
-                                displayName: 'Cookie Runner Customer' 
-                            }
-                        }
-                    }
-                ]
-            }
+        const now = new Date();
+        
+        // Minimum prep time: 20 minutes from now
+        const minPickupTime = new Date(now.getTime() + 20 * 60 * 1000);
+        
+        // Round up to next 15-minute interval
+        const minutes = minPickupTime.getMinutes();
+        const roundedMinutes = Math.ceil(minutes / 15) * 15;
+        minPickupTime.setMinutes(roundedMinutes, 0, 0);
+        
+        const timeSlots = [];
+        const maxSlotsToShow = 96;    // 96 slots = 24 hours worth (15-min intervals)
+        const maxDaysAhead = 14;      // Allow ordering up to 2 weeks in advance
+        
+        // Generate time slots - simple 15-minute intervals with no restrictions
+        for (let i = 0; i < maxSlotsToShow; i++) {
+            const slot = new Date(minPickupTime.getTime() + i * 15 * 60 * 1000);
+            
+            // Stop if we've exceeded max days ahead
+            const daysDiff = Math.floor((slot - now) / (1000 * 60 * 60 * 24));
+            if (daysDiff > maxDaysAhead) break;
+            
+            timeSlots.push(slot.toISOString());
+        }
+        
+        console.log(`📅 Generated ${timeSlots.length} pickup times (24/7 availability)`);
+        if (timeSlots.length > 0) {
+            console.log(`   First slot: ${timeSlots[0]}`);
+            console.log(`   Last slot: ${timeSlots[timeSlots.length - 1]}`);
+        }
+        
+        res.json({ 
+            pickupTimes: timeSlots,
+            allowPreorder: true,
+            maxDaysAhead: maxDaysAhead,
+            intervalMinutes: 15
         });
-        
-        const orderId = orderResult.result.order.id;
-        console.log('✅ Order created:', orderId, pickupAt ? `scheduled for ${pickupAt}` : 'ASAP');
-        
-        // Step 2: Pay for the order
-        const paymentResult = await squareClient.paymentsApi.createPayment({
-            idempotencyKey: require('crypto').randomUUID(),
-            sourceId: nonce,
-            amountMoney: {
-                amount: Math.round(amount * 100),
-                currency: 'USD'
-            },
-            orderId: orderId,
-            customerId: customerId,
-            locationId: process.env.SQUARE_LOCATION_ID,
-            autocomplete: true 
-        });
-        
-        console.log('✅ Payment captured!');
-        
-        res.json({ success: true, orderId: orderId });
         
     } catch (error) {
-        console.error('Error:', error);
-        res.status(500).json({ error: error.message });
+        console.error('Error generating pickup times:', error);
+        res.status(500).json({ 
+            error: 'Failed to generate pickup times',
+            details: error.message 
+        });
     }
 });
 // START SERVER
