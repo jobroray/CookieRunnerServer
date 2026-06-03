@@ -212,10 +212,8 @@ app.post('/api/customer', async (req, res) => {
     }
 });
 
-// AVAILABLE PICKUP TIMES ENDPOINT
 app.get('/api/available-pickup-times', async (req, res) => {
     try {
-        // Get current time
         const now = new Date();
         
         // Minimum prep time: 20 minutes from now
@@ -226,25 +224,54 @@ app.get('/api/available-pickup-times', async (req, res) => {
         const roundedMinutes = Math.ceil(minutes / 15) * 15;
         minPickupTime.setMinutes(roundedMinutes, 0, 0);
         
-        // Generate time slots
         const timeSlots = [];
         const businessHourStart = 7;  // 7 AM
         const businessHourEnd = 21;   // 9 PM
+        const maxSlotsToShow = 40;    // Show up to 40 time slots
+        const maxDaysAhead = 7;       // Allow ordering up to 7 days in advance
         
-        // Generate 12 time slots (3 hours worth)
-        for (let i = 0; i < 12; i++) {
-            const slot = new Date(minPickupTime.getTime() + i * 15 * 60 * 1000);
-            const hour = slot.getHours();
+        let currentSlot = new Date(minPickupTime);
+        let slotsAdded = 0;
+        let daysChecked = 0;
+        
+        // Keep generating slots until we have enough or hit the max days limit
+        while (slotsAdded < maxSlotsToShow && daysChecked < maxDaysAhead) {
+            const hour = currentSlot.getHours();
+            const currentDay = currentSlot.getDate();
             
-            // Only include slots during business hours
+            // Check if this slot is during business hours
             if (hour >= businessHourStart && hour < businessHourEnd) {
-                timeSlots.push(slot.toISOString());
+                timeSlots.push(currentSlot.toISOString());
+                slotsAdded++;
+            }
+            
+            // Move to next 15-minute slot
+            currentSlot = new Date(currentSlot.getTime() + 15 * 60 * 1000);
+            
+            // If we've moved past closing time, jump to opening time next day
+            if (currentSlot.getHours() >= businessHourEnd || currentSlot.getHours() < businessHourStart) {
+                // Set to next day at opening time
+                currentSlot.setDate(currentSlot.getDate() + 1);
+                currentSlot.setHours(businessHourStart, 0, 0, 0);
+                daysChecked++;
             }
         }
         
-        console.log(`📅 Generated ${timeSlots.length} available pickup times`);
+        console.log(`📅 Generated ${timeSlots.length} pickup times spanning ${daysChecked + 1} days`);
+        if (timeSlots.length > 0) {
+            console.log(`   First slot: ${timeSlots[0]}`);
+            console.log(`   Last slot: ${timeSlots[timeSlots.length - 1]}`);
+        }
         
-        res.json({ pickupTimes: timeSlots });
+        res.json({ 
+            pickupTimes: timeSlots,
+            businessHours: {
+                start: businessHourStart,
+                end: businessHourEnd
+            },
+            allowPreorder: true,
+            maxDaysAhead: maxDaysAhead
+        });
         
     } catch (error) {
         console.error('Error generating pickup times:', error);
