@@ -348,7 +348,7 @@ app.get('/api/orders/past', async (req, res) => {
     }
 });
 app.post('/api/process-payment', async (req, res) => {
-    const { nonce, amount, customerId, customerEmail } = req.body;
+    const { nonce, amount, customerId, customerEmail, pickupAt } = req.body;
     
     try {
         // Step 1: Create order
@@ -373,9 +373,9 @@ app.post('/api/process-payment', async (req, res) => {
                         type: 'PICKUP',
                         state: 'PROPOSED',
                         pickupDetails: {
-                            scheduleType: 'ASAP',
-                            // 👉 FIX 1: Give Square a prep time (15 minutes). 
-                            // Without this, Square thinks it takes 0 seconds and auto-completes it!
+                            // Use scheduled pickup time if provided
+                            scheduleType: pickupAt ? 'SCHEDULED' : 'ASAP',
+                            pickupAt: pickupAt || undefined,
                             prepTimeDuration: 'PT15M', 
                             recipient: {
                                 displayName: 'Cookie Runner Customer' 
@@ -387,7 +387,7 @@ app.post('/api/process-payment', async (req, res) => {
         });
         
         const orderId = orderResult.result.order.id;
-        console.log('✅ Order created as OPEN with fulfillments:', orderId);
+        console.log('✅ Order created:', orderId, pickupAt ? `scheduled for ${pickupAt}` : 'ASAP');
         
         // Step 2: Pay for the order
         const paymentResult = await squareClient.paymentsApi.createPayment({
@@ -400,12 +400,10 @@ app.post('/api/process-payment', async (req, res) => {
             orderId: orderId,
             customerId: customerId,
             locationId: process.env.SQUARE_LOCATION_ID,
-            // 👉 FIX 2: Set this to TRUE to capture the money instantly.
-            // Square hides unpaid/authorized-only orders from the kitchen POS!
             autocomplete: true 
         });
         
-        console.log('✅ Payment captured, order pushed to POS!');
+        console.log('✅ Payment captured!');
         
         res.json({ success: true, orderId: orderId });
         
