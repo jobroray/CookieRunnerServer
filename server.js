@@ -347,45 +347,134 @@ app.get('/api/orders/past', async (req, res) => {
         });
     }
 });
-// AVAILABLE PICKUP TIMES ENDPOINT - No Business Hours Restrictions
+// AVAILABLE PICKUP TIMES ENDPOINT - Connected to Square
 app.get('/api/available-pickup-times', async (req, res) => {
     try {
         const now = new Date();
+        const maxDaysAhead = 14;
+        const maxOrdersPerSlot = 2;
+        const slotIntervalMinutes = 15;
+        const minPrepTimeMinutes = 20;
         
-        // Minimum prep time: 20 minutes from now
-        const minPickupTime = new Date(now.getTime() + 20 * 60 * 1000);
+        // Step 1: Get location details including business hours
+        const locationResult = await squareClient.locationsApi.retrieveLocation(
+            process.env.SQUARE_LOCATION_ID
+        );
         
-        // Round up to next 15-minute interval
-        const minutes = minPickupTime.getMinutes();
-        const roundedMinutes = Math.ceil(minutes / 15) * 15;
-        minPickupTime.setMinutes(roundedMinutes, 0, 0);
+        const location = locationResult.result.location;
+        const businessHours = location.businessHours?.periods || [];
         
-        const timeSlots = [];
-        const maxSlotsToShow = 96;    // 96 slots = 24 hours worth (15-min intervals)
-        const maxDaysAhead = 14;      // Allow ordering up to 2 weeks in advance
+        console.log('📍 Location:', location.name);
+        console.log('🕐 Business hours:', JSON.stringify(businessHours, null, 2));
         
-        // Generate time slots - simple 15-minute intervals with no restrictions
-        for (let i = 0; i < maxSlotsToShow; i++) {
-            const slot = new Date(minPickupTime.getTime() + i * 15 * 60 * 1000);
-            
-            // Stop if we've exceeded max days ahead
-            const daysDiff = Math.floor((slot - now) / (1000 * 60 * 60 * 24));
-            if (daysDiff > maxDaysAhead) break;
-            
-            timeSlots.push(slot.toISOString());
+        // Step 2: Get all existing orders for the next 14 days
+        const futureDate = new Date(now);
+        futureDate.setDate(futureDate.getDate() + maxDaysAhead);
+        
+        const ordersResult = await squareClient.ordersApi.searchOrders({
+            locationIds: [process.env.SQUARE_LOCATION_ID],
+            query: {
+                filter: {
+                    stateFilter: {
+                        states: ['OPEN', 'PROPOSED']
+                    },
+                    dateTimeFilter: {
+                        createdAt: {
+                            startAt: now.toISOString(),
+                            endAt: futureDate.toISOString()
+                        }
+                    }
+                }
+            },
+            limit: 500
+        });
+        
+        // Map of pickup times to order count
+        const ordersBySlot = {};
+        
+        if (ordersResult.result.orders) {
+            ordersResult.result.orders.forEach(order => {
+                if (order.fulfillments && order.fulfillments.length > 0) {
+                    const fulfillment = order.fulfillments[0];
+                    if (fulfillment.pickupDetails?.pickupAt) {
+                        const pickupTime = fulfillment.pickupDetails.pickupAt;
+                        ordersBySlot[pickupTime] = (ordersBySlot[pickupTime] || 0) + 1;
+                    }
+                }
+            });
         }
         
-        console.log(`📅 Generated ${timeSlots.length} pickup times (24/7 availability)`);
-        if (timeSlots.length > 0) {
-            console.log(`   First slot: ${timeSlots[0]}`);
-            console.log(`   Last slot: ${timeSlots[timeSlots.length - 1]}`);
+        console.log('📦 Found', Object.keys(ordersBySlot).length, 'scheduled pickup slots with orders');
+        
+        // Step 3: Generate available time slots
+        const availableSlots = [];
+        let currentSlot = new Date(now.getTime() + minPrepTimeMinutes * 60 * 1000);
+        
+        // Round to next 15-minute interval
+        const minutes = currentSlot.getMinutes();
+        const roundedMinutes = Math.ceil(minutes / slotIntervalMinutes) * slotIntervalMinutes;
+        currentSlot.setMinutes(roundedMinutes, 0, 0);
+        
+        // Generate slots for next 14 days
+        const endDate = new Date(now);
+        endDate.setDate(endDate.getDate() + maxDaysAhead);
+        
+        while (currentSlot < endDate && availableSlots.length < 200) {
+            const dayOfWeek = currentSlot.getDay(); // 0 = Sunday, 6 = Saturday
+            const hour = currentSlot.getHours();
+            const minute = currentSlot.getMinutes();
+            
+            // Check if this day/time is within business hours
+            const isOpen = businessHours.some(period => {
+                // dayOfWeek in Square: MON = 1, TUE = 2, WED = 3, THU = 4, FRI = 5, SAT = 6, SUN = 0
+                // JavaScript: Sunday = 0, Monday = 1, etc.
+                const squareDayMap = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+                
+                if (period.dayOfWeek !== squareDayMap[dayOfWeek]) {
+                    return false;
+                }
+                
+                // Parse start and end times (format: "HH:MM")
+                const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
+                const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
+                
+                const currentMinutes = hour * 60 + minute;
+                const startMinutes = startHour * 60 + startMin;
+                const endMinutes = endHour * 60 + endMin;
+                
+                return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+            });
+            
+            if (isOpen) {
+                // Check if this slot has availability (< 2 orders)
+                const slotKey = currentSlot.toISOString();
+                const ordersInSlot = ordersBySlot[slotKey] || 0;
+                
+                if (ordersInSlot < maxOrdersPerSlot) {
+                    availableSlots.push({
+                        time: slotKey,
+                        ordersInSlot: ordersInSlot,
+                        spotsLeft: maxOrdersPerSlot - ordersInSlot
+                    });
+                }
+            }
+            
+            // Move to next 15-minute slot
+            currentSlot = new Date(currentSlot.getTime() + slotIntervalMinutes * 60 * 1000);
         }
+        
+        console.log(`✅ Generated ${availableSlots.length} available pickup slots`);
+        
+        // Return just the times for the app
+        const pickupTimes = availableSlots.map(slot => slot.time);
         
         res.json({ 
-            pickupTimes: timeSlots,
-            allowPreorder: true,
-            maxDaysAhead: maxDaysAhead,
-            intervalMinutes: 15
+            pickupTimes: pickupTimes,
+            metadata: {
+                totalSlots: availableSlots.length,
+                maxOrdersPerSlot: maxOrdersPerSlot,
+                intervalMinutes: slotIntervalMinutes
+            }
         });
         
     } catch (error) {
