@@ -212,6 +212,49 @@ app.post('/api/customer', async (req, res) => {
     }
 });
 
+// AVAILABLE PICKUP TIMES ENDPOINT
+app.get('/api/available-pickup-times', async (req, res) => {
+    try {
+        // Get current time
+        const now = new Date();
+        
+        // Minimum prep time: 20 minutes from now
+        const minPickupTime = new Date(now.getTime() + 20 * 60 * 1000);
+        
+        // Round up to next 15-minute interval
+        const minutes = minPickupTime.getMinutes();
+        const roundedMinutes = Math.ceil(minutes / 15) * 15;
+        minPickupTime.setMinutes(roundedMinutes, 0, 0);
+        
+        // Generate time slots
+        const timeSlots = [];
+        const businessHourStart = 7;  // 7 AM
+        const businessHourEnd = 21;   // 9 PM
+        
+        // Generate 12 time slots (3 hours worth)
+        for (let i = 0; i < 12; i++) {
+            const slot = new Date(minPickupTime.getTime() + i * 15 * 60 * 1000);
+            const hour = slot.getHours();
+            
+            // Only include slots during business hours
+            if (hour >= businessHourStart && hour < businessHourEnd) {
+                timeSlots.push(slot.toISOString());
+            }
+        }
+        
+        console.log(`📅 Generated ${timeSlots.length} available pickup times`);
+        
+        res.json({ pickupTimes: timeSlots });
+        
+    } catch (error) {
+        console.error('Error generating pickup times:', error);
+        res.status(500).json({ 
+            error: 'Failed to generate pickup times',
+            details: error.message 
+        });
+    }
+});
+
 app.get('/api/orders/active', async (req, res) => {
     try {
         const customerId = req.query.customerId;
