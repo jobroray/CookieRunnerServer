@@ -11,6 +11,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const token = process.env.SQUARE_ACCESS_TOKEN;
+console.log("=== SQUARE TOKEN DIAGNOSTICS ===");
+console.log("1. Token actually exists inside Render?", !!token);
+if (token) {
+    console.log("2. Token character count:", token.length);
+    console.log("3. Starts with EAAA?", token.startsWith("EAAA"));
+    console.log("4. Has accidental quotes?", token.includes('"') || token.includes("'"));
+    console.log("5. Has accidental spaces?", token.includes(' '));
+}
+console.log("================================");
+
 const squareClient = new Client({
     bearerAuthCredentials: {
         accessToken: process.env.SQUARE_ACCESS_TOKEN
