@@ -347,7 +347,7 @@ app.get('/api/orders/past', async (req, res) => {
         });
     }
 });
-// AVAILABLE PICKUP TIMES ENDPOINT - Connected to Square
+// AVAILABLE PICKUP TIMES ENDPOINT - Fixed
 app.get('/api/available-pickup-times', async (req, res) => {
     try {
         const now = new Date();
@@ -371,12 +371,14 @@ app.get('/api/available-pickup-times', async (req, res) => {
         const futureDate = new Date(now);
         futureDate.setDate(futureDate.getDate() + maxDaysAhead);
         
+        // ⚠️ FIX: Remove 'PROPOSED' - it's not valid for order state filter
+        // Valid states: OPEN, COMPLETED, CANCELED, DRAFT
         const ordersResult = await squareClient.ordersApi.searchOrders({
             locationIds: [process.env.SQUARE_LOCATION_ID],
             query: {
                 filter: {
                     stateFilter: {
-                        states: ['OPEN', 'PROPOSED']
+                        states: ['OPEN']  // ← FIXED: Only OPEN orders
                     },
                     dateTimeFilter: {
                         createdAt: {
@@ -426,8 +428,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
             
             // Check if this day/time is within business hours
             const isOpen = businessHours.some(period => {
-                // dayOfWeek in Square: MON = 1, TUE = 2, WED = 3, THU = 4, FRI = 5, SAT = 6, SUN = 0
-                // JavaScript: Sunday = 0, Monday = 1, etc.
+                // Square day mapping
                 const squareDayMap = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
                 
                 if (period.dayOfWeek !== squareDayMap[dayOfWeek]) {
@@ -478,7 +479,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('Error generating pickup times:', error);
+        console.error('❌ Error generating pickup times:', error);
         res.status(500).json({ 
             error: 'Failed to generate pickup times',
             details: error.message 
