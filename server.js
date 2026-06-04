@@ -345,7 +345,6 @@ app.get('/api/orders/past', async (req, res) => {
         });
     }
 });
-const moment = require('moment-timezone');
 
 app.get('/api/available-pickup-times', async (req, res) => {
     try {
