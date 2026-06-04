@@ -622,9 +622,9 @@ app.post('/api/process-payment', async (req, res) => {
         console.log('   Pickup:', pickupAt);
         console.log('   Discount:', discountCode || 'None');
 
-        if (!nonce || !amount || !customerId) {
-            return res.status(400).json({ error: 'Missing required payment fields' });
-        }
+        if (!nonce || amount === undefined || amount === null || !customerId) {
+    return res.status(400).json({ error: 'Missing required payment fields' });
+}
 
         // Generate unique idempotency keys
         const { randomUUID } = require('crypto');
