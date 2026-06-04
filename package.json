@@ -15,5 +15,15 @@
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "square": "^44.1.0"
+    {
+  "name": "cookie-runner-backend",
+  "version": "1.0.0",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "square": "latest",
+    "moment-timezone": "^0.5.43"
   }
 }
+  }
