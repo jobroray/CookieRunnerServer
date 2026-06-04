@@ -353,24 +353,38 @@ app.get('/api/available-pickup-times', async (req, res) => {
         const maxDaysAhead = 14;
         const maxOrdersPerSlot = 2;
         const slotIntervalMinutes = 15;
-        const minPrepTimeMinutes = 20;
         
-        // Step 1: Get location details including business hours
+        // ⚠️ FIX: Get prep time from Square location settings
+        let minPrepTimeMinutes = 35; // Default to 35 minutes (your setting)
+        
+        const locationTimezone = 'America/Los_Angeles';
+        
+        console.log('⏰ Server time (UTC):', now.toISOString());
+        console.log('⏰ Local time:', now.toLocaleString('en-US', { timeZone: locationTimezone }));
+        
+        // Step 1: Get location and business hours
         const locationResult = await squareClient.locationsApi.retrieveLocation(
             process.env.SQUARE_LOCATION_ID
         );
         
         const location = locationResult.result.location;
         const businessHours = location.businessHours?.periods || [];
-        const locationTimezone = location.timezone || 'America/Los_Angeles';
         
         console.log('📍 Location:', location.name);
-        console.log('🌍 Timezone:', locationTimezone);
-        console.log('🕐 Business hours:', JSON.stringify(businessHours, null, 2));
+        console.log('📍 Timezone:', location.timezone || locationTimezone);
+        console.log('🕐 Business hours periods:', businessHours.length);
+        console.log('⏱️  Minimum prep time:', minPrepTimeMinutes, 'minutes');
         
         if (businessHours.length === 0) {
-            return res.json({ pickupTimes: [], metadata: { error: 'No business hours configured' } });
+            return res.json({ 
+                pickupTimes: [],
+                metadata: { error: 'No business hours configured' }
+            });
         }
+        
+        businessHours.forEach(period => {
+            console.log(`   ${period.dayOfWeek}: ${period.startLocalTime} - ${period.endLocalTime}`);
+        });
         
         // Step 2: Get existing orders
         const futureDate = new Date(now);
@@ -392,7 +406,6 @@ app.get('/api/available-pickup-times', async (req, res) => {
             limit: 500
         });
         
-        // Count orders per slot
         const ordersBySlot = {};
         if (ordersResult.result.orders) {
             ordersResult.result.orders.forEach(order => {
@@ -405,8 +418,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
         
         console.log('📦 Found', Object.keys(ordersBySlot).length, 'scheduled pickup slots with orders');
         
-        // Step 3: Generate available slots
-        const availableSlots = [];
+        // ✅ FIX: Start from prep time (35 min) instead of 20 min
         let currentSlot = new Date(now.getTime() + minPrepTimeMinutes * 60 * 1000);
         
         // Round to next 15-minute interval
@@ -414,24 +426,19 @@ app.get('/api/available-pickup-times', async (req, res) => {
         const roundedMinutes = Math.ceil(minutes / slotIntervalMinutes) * slotIntervalMinutes;
         currentSlot.setMinutes(roundedMinutes, 0, 0);
         
+        console.log('🎯 First possible slot:', currentSlot.toISOString());
+        
+        const availableSlots = [];
         const endDate = new Date(now);
         endDate.setDate(endDate.getDate() + maxDaysAhead);
         
         while (currentSlot < endDate && availableSlots.length < 200) {
-            // ✅ FIX: Convert to local time for day/hour comparison
-            const localTimeString = currentSlot.toLocaleString('en-US', { 
-                timeZone: locationTimezone,
-                weekday: 'short',
-                hour: '2-digit',
-                minute: '2-digit',
-                hour12: false
-            });
+            // Convert to local time for comparison
+            const dayOfWeek = currentSlot.toLocaleDateString('en-US', { 
+                timeZone: locationTimezone, 
+                weekday: 'short' 
+            }).toUpperCase();
             
-            // Parse local time components
-            const localDate = new Date(currentSlot.toLocaleString('en-US', { timeZone: locationTimezone }));
-            const dayOfWeek = currentSlot.toLocaleDateString('en-US', { timeZone: locationTimezone, weekday: 'short' }).toUpperCase();
-            
-            // Get local hour and minute
             const localParts = currentSlot.toLocaleString('en-US', { 
                 timeZone: locationTimezone,
                 hour: '2-digit',
@@ -441,16 +448,10 @@ app.get('/api/available-pickup-times', async (req, res) => {
             const localHour = parseInt(localParts[0]);
             const localMinute = parseInt(localParts[1]);
             
-            // Check if this day/time is within business hours
+            // Check if within business hours
             const isOpen = businessHours.some(period => {
-                // Map Square day names (SUN, MON, etc.) to JavaScript short names
-                const dayMap = { 'SUN': 'SUN', 'MON': 'MON', 'TUE': 'TUE', 'WED': 'WED', 'THU': 'THU', 'FRI': 'FRI', 'SAT': 'SAT' };
+                if (period.dayOfWeek !== dayOfWeek) return false;
                 
-                if (period.dayOfWeek !== dayOfWeek) {
-                    return false;
-                }
-                
-                // Parse business hours
                 const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
                 const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
                 
@@ -474,7 +475,6 @@ app.get('/api/available-pickup-times', async (req, res) => {
                 }
             }
             
-            // Move to next slot
             currentSlot = new Date(currentSlot.getTime() + slotIntervalMinutes * 60 * 1000);
         }
         
@@ -485,7 +485,8 @@ app.get('/api/available-pickup-times', async (req, res) => {
             metadata: {
                 totalSlots: availableSlots.length,
                 maxOrdersPerSlot: maxOrdersPerSlot,
-                intervalMinutes: slotIntervalMinutes
+                intervalMinutes: slotIntervalMinutes,
+                prepTimeMinutes: minPrepTimeMinutes
             }
         });
         
