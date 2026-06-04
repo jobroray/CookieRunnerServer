@@ -623,8 +623,8 @@ app.post('/api/process-payment', async (req, res) => {
         console.log('   Discount:', discountCode || 'None');
 
         if (!nonce || amount === undefined || amount === null || !customerId) {
-    return res.status(400).json({ error: 'Missing required payment fields' });
-}
+            return res.status(400).json({ error: 'Missing required payment fields' });
+        }
 
         // Generate unique idempotency keys
         const { randomUUID } = require('crypto');
@@ -692,7 +692,22 @@ app.post('/api/process-payment', async (req, res) => {
         const { result: orderResult } = await squareClient.ordersApi.createOrder(orderRequest);
         console.log('✅ Order created:', orderResult.order.id);
 
-        // Create payment for the order
+        // Check if this is a free order (100% discount)
+        if (amount === 0) {
+            console.log('🎁 Free order (100% discount) - skipping payment creation');
+            
+            // For free orders, we still need to mark the order as paid
+            // We can do this by updating the order state or just return success
+            return res.json({
+                success: true,
+                orderId: orderResult.order.id,
+                paymentId: null, // No payment needed
+                totalMoney: orderResult.order.totalMoney,
+                isFreeOrder: true
+            });
+        }
+
+        // For paid orders, create the payment
         const paymentRequest = {
             idempotencyKey: paymentIdempotencyKey,
             sourceId: nonce,
@@ -712,7 +727,8 @@ app.post('/api/process-payment', async (req, res) => {
             success: true,
             orderId: orderResult.order.id,
             paymentId: paymentResult.payment.id,
-            totalMoney: orderResult.order.totalMoney
+            totalMoney: orderResult.order.totalMoney,
+            isFreeOrder: false
         });
 
     } catch (error) {
