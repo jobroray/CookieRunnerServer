@@ -367,14 +367,23 @@ app.get('/api/available-pickup-times', async (req, res) => {
         
         console.log('📍 Location:', location.name);
         console.log('⏱️  Prep time:', minPrepTimeMinutes, 'minutes');
-        console.log('🕐 Business hours:', businessHours.length, 'periods');
+        console.log('🕐 Total business hour periods:', businessHours.length);
         
         if (businessHours.length === 0) {
             return res.json({ pickupTimes: [], metadata: { error: 'No business hours' } });
         }
         
+        // Log all periods grouped by day
+        console.log('📋 Business Hours by Day:');
+        const groupedByDay = {};
         businessHours.forEach(period => {
-            console.log(`   ${period.dayOfWeek}: ${period.startLocalTime} - ${period.endLocalTime}`);
+            if (!groupedByDay[period.dayOfWeek]) {
+                groupedByDay[period.dayOfWeek] = [];
+            }
+            groupedByDay[period.dayOfWeek].push(`${period.startLocalTime}-${period.endLocalTime}`);
+        });
+        Object.keys(groupedByDay).forEach(day => {
+            console.log(`   ${day}: ${groupedByDay[day].join(', ')}`);
         });
         
         // Get existing orders
@@ -408,7 +417,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
         
         console.log('📦 Existing orders in slots:', Object.keys(ordersBySlot).length);
         
-        // ✅ FIX: Start from now + prep time, then find next valid slot
+        // Start from now + prep time
         let currentSlot = now.clone().add(minPrepTimeMinutes, 'minutes');
         
         console.log('🎯 Earliest with prep:', currentSlot.format('M/D/YYYY, h:mm A'));
@@ -416,73 +425,88 @@ app.get('/api/available-pickup-times', async (req, res) => {
         const availableSlots = [];
         const endDate = now.clone().add(maxDaysAhead, 'days');
         let iterations = 0;
-        const maxIterations = 1000;
+        const maxIterations = 2000;
         
         while (currentSlot.isBefore(endDate) && availableSlots.length < 200 && iterations < maxIterations) {
             iterations++;
             
-            // Get day of week (MON, TUE, etc.)
             const dayOfWeek = currentSlot.format('ddd').toUpperCase();
             const hour = currentSlot.hour();
             const minute = currentSlot.minute();
             const currentMinutes = hour * 60 + minute;
             
-            // Find business hours for this day
-            const businessPeriod = businessHours.find(period => period.dayOfWeek === dayOfWeek);
+            // ✅ FIX: Get ALL periods for this day
+            const dayPeriods = businessHours.filter(period => period.dayOfWeek === dayOfWeek);
             
-            if (businessPeriod) {
-                const [startHour, startMin] = businessPeriod.startLocalTime.split(':').map(Number);
-                const [endHour, endMin] = businessPeriod.endLocalTime.split(':').map(Number);
+            if (dayPeriods.length > 0) {
+                let foundValidSlot = false;
+                let jumpedToNextPeriod = false;
                 
-                const startMinutes = startHour * 60 + startMin;
-                const endMinutes = endHour * 60 + endMin;
-                
-                // ✅ FIX: Check if we're before opening time
-                if (currentMinutes < startMinutes) {
-                    // Jump to opening time + prep time
-                    currentSlot.hour(startHour).minute(startMin).second(0).millisecond(0);
-                    currentSlot.add(minPrepTimeMinutes, 'minutes');
+                // Check each period for this day
+                for (const period of dayPeriods) {
+                    const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
+                    const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
                     
-                    // Round to next 15-minute interval
-                    const remainder = 15 - (currentSlot.minute() % 15);
-                    if (remainder !== 15) {
-                        currentSlot.add(remainder, 'minutes');
+                    const startMinutes = startHour * 60 + startMin;
+                    const endMinutes = endHour * 60 + endMin;
+                    
+                    // If before this period's start, jump to start + prep
+                    if (currentMinutes < startMinutes) {
+                        currentSlot.hour(startHour).minute(startMin).second(0).millisecond(0);
+                        currentSlot.add(minPrepTimeMinutes, 'minutes');
+                        
+                        // Round to next 15-minute interval
+                        const remainder = 15 - (currentSlot.minute() % 15);
+                        if (remainder !== 15) {
+                            currentSlot.add(remainder, 'minutes');
+                        }
+                        jumpedToNextPeriod = true;
+                        break;
                     }
+                    
+                    // If within this period
+                    if (currentMinutes >= startMinutes && currentMinutes < endMinutes) {
+                        const minutesSinceOpening = currentMinutes - startMinutes;
+                        
+                        // Check if enough prep time has passed
+                        if (minutesSinceOpening >= minPrepTimeMinutes) {
+                            // Round to 15-minute interval
+                            const remainder = currentSlot.minute() % 15;
+                            if (remainder !== 0) {
+                                currentSlot.add(15 - remainder, 'minutes');
+                                jumpedToNextPeriod = true;
+                                break;
+                            }
+                            
+                            const slotKey = currentSlot.toISOString();
+                            const ordersInSlot = ordersBySlot[slotKey] || 0;
+                            
+                            if (ordersInSlot < maxOrdersPerSlot) {
+                                availableSlots.push({
+                                    time: slotKey,
+                                    ordersInSlot: ordersInSlot,
+                                    spotsLeft: maxOrdersPerSlot - ordersInSlot
+                                });
+                            }
+                            
+                            foundValidSlot = true;
+                            break;
+                        }
+                    }
+                }
+                
+                if (jumpedToNextPeriod) {
                     continue;
                 }
                 
-                // Check if within hours (and has passed opening + prep time)
-                const isWithinHours = currentMinutes >= startMinutes && currentMinutes < endMinutes;
-                const minutesSinceOpening = currentMinutes - startMinutes;
-                const hasEnoughPrepTime = minutesSinceOpening >= minPrepTimeMinutes;
-                
-                if (isWithinHours && hasEnoughPrepTime) {
-                    // Round to 15-minute interval
-                    const remainder = currentSlot.minute() % 15;
-                    if (remainder !== 0) {
-                        currentSlot.add(15 - remainder, 'minutes');
-                        continue;
-                    }
-                    
-                    const slotKey = currentSlot.toISOString();
-                    const ordersInSlot = ordersBySlot[slotKey] || 0;
-                    
-                    if (ordersInSlot < maxOrdersPerSlot) {
-                        availableSlots.push({
-                            time: slotKey,
-                            ordersInSlot: ordersInSlot,
-                            spotsLeft: maxOrdersPerSlot - ordersInSlot
-                        });
-                    }
-                    
-                    // Move to next 15-minute slot
+                if (foundValidSlot) {
                     currentSlot.add(slotIntervalMinutes, 'minutes');
                 } else {
-                    // Not within hours or not enough prep time - move to next slot
+                    // Not in any valid period, move forward
                     currentSlot.add(slotIntervalMinutes, 'minutes');
                 }
             } else {
-                // Not open this day - skip to next day at midnight
+                // No periods for this day - skip to next day
                 currentSlot.add(1, 'day').startOf('day');
             }
         }
@@ -491,8 +515,8 @@ app.get('/api/available-pickup-times', async (req, res) => {
         if (availableSlots.length > 0) {
             const first = moment(availableSlots[0].time).tz(locationTimezone);
             const last = moment(availableSlots[availableSlots.length - 1].time).tz(locationTimezone);
-            console.log(`   First: ${first.format('M/D/YYYY, h:mm A')}`);
-            console.log(`   Last: ${last.format('M/D/YYYY, h:mm A')}`);
+            console.log(`   First: ${first.format('ddd M/D/YYYY, h:mm A')}`);
+            console.log(`   Last: ${last.format('ddd M/D/YYYY, h:mm A')}`);
         }
         
         res.json({ 
