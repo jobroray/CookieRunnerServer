@@ -345,17 +345,18 @@ app.get('/api/orders/past', async (req, res) => {
         });
     }
 });
+const moment = require('moment-timezone');
+
 app.get('/api/available-pickup-times', async (req, res) => {
     try {
-        const now = new Date();
+        const locationTimezone = 'America/Chicago';
+        const now = moment().tz(locationTimezone);
         const maxDaysAhead = 14;
         const maxOrdersPerSlot = 2;
         const slotIntervalMinutes = 15;
         const minPrepTimeMinutes = 35;
-        const locationTimezone = 'America/Chicago';
         
-        console.log('⏰ Current time (UTC):', now.toISOString());
-        console.log('⏰ Current time (Local):', now.toLocaleString('en-US', { timeZone: locationTimezone }));
+        console.log('⏰ Current time (Local):', now.format('M/D/YYYY, h:mm:ss A'));
         
         // Get location and business hours
         const locationResult = await squareClient.locationsApi.retrieveLocation(
@@ -378,8 +379,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
         });
         
         // Get existing orders
-        const futureDate = new Date(now);
-        futureDate.setDate(futureDate.getDate() + maxDaysAhead);
+        const futureDate = moment().add(maxDaysAhead, 'days').toDate();
         
         const ordersResult = await squareClient.ordersApi.searchOrders({
             locationIds: [process.env.SQUARE_LOCATION_ID],
@@ -388,7 +388,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
                     stateFilter: { states: ['OPEN'] },
                     dateTimeFilter: {
                         createdAt: {
-                            startAt: now.toISOString(),
+                            startAt: moment().toISOString(),
                             endAt: futureDate.toISOString()
                         }
                     }
@@ -407,130 +407,94 @@ app.get('/api/available-pickup-times', async (req, res) => {
             });
         }
         
-        console.log('📦 Existing orders:', Object.keys(ordersBySlot).length, 'slots');
+        console.log('📦 Existing orders in slots:', Object.keys(ordersBySlot).length);
         
-        // ✅ NEW LOGIC: Find the next opening time
-        const findNextOpeningSlot = (fromTime) => {
-            let checkTime = new Date(fromTime);
-            const maxChecks = 100; // Prevent infinite loop
-            let checks = 0;
-            
-            while (checks < maxChecks) {
-                const formatter = new Intl.DateTimeFormat('en-US', {
-                    timeZone: locationTimezone,
-                    weekday: 'short',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    hour12: false
-                });
-                
-                const parts = formatter.formatToParts(checkTime);
-                const dayOfWeek = parts.find(p => p.type === 'weekday').value.toUpperCase();
-                const hour = parseInt(parts.find(p => p.type === 'hour').value);
-                const minute = parseInt(parts.find(p => p.type === 'minute').value);
-                
-                // Find business hours for this day
-                const todayHours = businessHours.find(p => p.dayOfWeek === dayOfWeek);
-                
-                if (todayHours) {
-                    const [startHour, startMin] = todayHours.startLocalTime.split(':').map(Number);
-                    const currentMinutes = hour * 60 + minute;
-                    const openingMinutes = startHour * 60 + startMin;
-                    
-                    // If we're before opening time today, return opening time
-                    if (currentMinutes < openingMinutes) {
-                        // Set to opening time of this day
-                        const openingTime = new Date(checkTime);
-                        const localDateStr = openingTime.toLocaleDateString('en-US', { 
-                            timeZone: locationTimezone,
-                            year: 'numeric',
-                            month: '2-digit',
-                            day: '2-digit'
-                        });
-                        const [month, day, year] = localDateStr.split('/');
-                        const openingISOStr = `${year}-${month}-${day}T${todayHours.startLocalTime}:00`;
-                        
-                        // Parse as local time
-                        const localOpening = new Date(openingISOStr);
-                        return localOpening;
-                    } else {
-                        // We're during or after opening - return the check time
-                        return checkTime;
-                    }
-                }
-                
-                // Not open today, try tomorrow
-                checkTime = new Date(checkTime.getTime() + 24 * 60 * 60 * 1000);
-                checkTime.setHours(0, 0, 0, 0); // Start of next day
-                checks++;
-            }
-            
-            return checkTime; // Fallback
-        };
+        // ✅ FIX: Start from now + prep time, then find next valid slot
+        let currentSlot = now.clone().add(minPrepTimeMinutes, 'minutes');
         
-        // ✅ Determine starting point
-        const earliestWithPrep = new Date(now.getTime() + minPrepTimeMinutes * 60 * 1000);
-        let startSlot = findNextOpeningSlot(earliestWithPrep);
+        console.log('🎯 Earliest with prep:', currentSlot.format('M/D/YYYY, h:mm A'));
         
-        // Round to next 15-minute interval
-        const minutes = startSlot.getMinutes();
-        const roundedMinutes = Math.ceil(minutes / slotIntervalMinutes) * slotIntervalMinutes;
-        startSlot.setMinutes(roundedMinutes, 0, 0);
-        
-        console.log('🎯 Earliest pickup with prep:', earliestWithPrep.toISOString());
-        console.log('🎯 First available slot:', startSlot.toISOString());
-        console.log('🎯 First slot (local):', startSlot.toLocaleString('en-US', { timeZone: locationTimezone }));
-        
-        // Generate slots
         const availableSlots = [];
-        let currentSlot = new Date(startSlot);
-        const endDate = new Date(now);
-        endDate.setDate(endDate.getDate() + maxDaysAhead);
+        const endDate = now.clone().add(maxDaysAhead, 'days');
+        let iterations = 0;
+        const maxIterations = 1000;
         
-        while (currentSlot < endDate && availableSlots.length < 200) {
-            const formatter = new Intl.DateTimeFormat('en-US', {
-                timeZone: locationTimezone,
-                weekday: 'short',
-                hour: '2-digit',
-                minute: '2-digit',
-                hour12: false
-            });
+        while (currentSlot.isBefore(endDate) && availableSlots.length < 200 && iterations < maxIterations) {
+            iterations++;
             
-            const parts = formatter.formatToParts(currentSlot);
-            const dayOfWeek = parts.find(p => p.type === 'weekday').value.toUpperCase();
-            const hour = parseInt(parts.find(p => p.type === 'hour').value);
-            const minute = parseInt(parts.find(p => p.type === 'minute').value);
+            // Get day of week (MON, TUE, etc.)
+            const dayOfWeek = currentSlot.format('ddd').toUpperCase();
+            const hour = currentSlot.hour();
+            const minute = currentSlot.minute();
+            const currentMinutes = hour * 60 + minute;
             
-            const isOpen = businessHours.some(period => {
-                if (period.dayOfWeek !== dayOfWeek) return false;
+            // Find business hours for this day
+            const businessPeriod = businessHours.find(period => period.dayOfWeek === dayOfWeek);
+            
+            if (businessPeriod) {
+                const [startHour, startMin] = businessPeriod.startLocalTime.split(':').map(Number);
+                const [endHour, endMin] = businessPeriod.endLocalTime.split(':').map(Number);
                 
-                const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
-                const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
-                
-                const currentMinutes = hour * 60 + minute;
                 const startMinutes = startHour * 60 + startMin;
                 const endMinutes = endHour * 60 + endMin;
                 
-                return currentMinutes >= startMinutes && currentMinutes < endMinutes;
-            });
-            
-            if (isOpen) {
-                const slotKey = currentSlot.toISOString();
-                const ordersInSlot = ordersBySlot[slotKey] || 0;
-                
-                if (ordersInSlot < maxOrdersPerSlot) {
-                    availableSlots.push({
-                        time: slotKey,
-                        ordersInSlot: ordersInSlot,
-                        spotsLeft: maxOrdersPerSlot - ordersInSlot
-                    });
+                // ✅ FIX: Check if we're before opening time
+                if (currentMinutes < startMinutes) {
+                    // Jump to opening time + prep time
+                    currentSlot.hour(startHour).minute(startMin).second(0).millisecond(0);
+                    currentSlot.add(minPrepTimeMinutes, 'minutes');
+                    
+                    // Round to next 15-minute interval
+                    const remainder = 15 - (currentSlot.minute() % 15);
+                    if (remainder !== 15) {
+                        currentSlot.add(remainder, 'minutes');
+                    }
+                    continue;
                 }
+                
+                // Check if within hours (and has passed opening + prep time)
+                const isWithinHours = currentMinutes >= startMinutes && currentMinutes < endMinutes;
+                const minutesSinceOpening = currentMinutes - startMinutes;
+                const hasEnoughPrepTime = minutesSinceOpening >= minPrepTimeMinutes;
+                
+                if (isWithinHours && hasEnoughPrepTime) {
+                    // Round to 15-minute interval
+                    const remainder = currentSlot.minute() % 15;
+                    if (remainder !== 0) {
+                        currentSlot.add(15 - remainder, 'minutes');
+                        continue;
+                    }
+                    
+                    const slotKey = currentSlot.toISOString();
+                    const ordersInSlot = ordersBySlot[slotKey] || 0;
+                    
+                    if (ordersInSlot < maxOrdersPerSlot) {
+                        availableSlots.push({
+                            time: slotKey,
+                            ordersInSlot: ordersInSlot,
+                            spotsLeft: maxOrdersPerSlot - ordersInSlot
+                        });
+                    }
+                    
+                    // Move to next 15-minute slot
+                    currentSlot.add(slotIntervalMinutes, 'minutes');
+                } else {
+                    // Not within hours or not enough prep time - move to next slot
+                    currentSlot.add(slotIntervalMinutes, 'minutes');
+                }
+            } else {
+                // Not open this day - skip to next day at midnight
+                currentSlot.add(1, 'day').startOf('day');
             }
-            
-            currentSlot = new Date(currentSlot.getTime() + slotIntervalMinutes * 60 * 1000);
         }
         
-        console.log(`✅ Generated ${availableSlots.length} slots`);
+        console.log(`✅ Generated ${availableSlots.length} slots (${iterations} iterations)`);
+        if (availableSlots.length > 0) {
+            const first = moment(availableSlots[0].time).tz(locationTimezone);
+            const last = moment(availableSlots[availableSlots.length - 1].time).tz(locationTimezone);
+            console.log(`   First: ${first.format('M/D/YYYY, h:mm A')}`);
+            console.log(`   Last: ${last.format('M/D/YYYY, h:mm A')}`);
+        }
         
         res.json({ 
             pickupTimes: availableSlots.map(slot => slot.time),
