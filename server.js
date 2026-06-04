@@ -347,7 +347,6 @@ app.get('/api/orders/past', async (req, res) => {
         });
     }
 });
-// AVAILABLE PICKUP TIMES ENDPOINT - Fixed
 app.get('/api/available-pickup-times', async (req, res) => {
     try {
         const now = new Date();
@@ -363,23 +362,25 @@ app.get('/api/available-pickup-times', async (req, res) => {
         
         const location = locationResult.result.location;
         const businessHours = location.businessHours?.periods || [];
+        const locationTimezone = location.timezone || 'America/Los_Angeles';
         
         console.log('📍 Location:', location.name);
+        console.log('🌍 Timezone:', locationTimezone);
         console.log('🕐 Business hours:', JSON.stringify(businessHours, null, 2));
         
-        // Step 2: Get all existing orders for the next 14 days
+        if (businessHours.length === 0) {
+            return res.json({ pickupTimes: [], metadata: { error: 'No business hours configured' } });
+        }
+        
+        // Step 2: Get existing orders
         const futureDate = new Date(now);
         futureDate.setDate(futureDate.getDate() + maxDaysAhead);
         
-        // ⚠️ FIX: Remove 'PROPOSED' - it's not valid for order state filter
-        // Valid states: OPEN, COMPLETED, CANCELED, DRAFT
         const ordersResult = await squareClient.ordersApi.searchOrders({
             locationIds: [process.env.SQUARE_LOCATION_ID],
             query: {
                 filter: {
-                    stateFilter: {
-                        states: ['OPEN']  // ← FIXED: Only OPEN orders
-                    },
+                    stateFilter: { states: ['OPEN'] },
                     dateTimeFilter: {
                         createdAt: {
                             startAt: now.toISOString(),
@@ -391,24 +392,20 @@ app.get('/api/available-pickup-times', async (req, res) => {
             limit: 500
         });
         
-        // Map of pickup times to order count
+        // Count orders per slot
         const ordersBySlot = {};
-        
         if (ordersResult.result.orders) {
             ordersResult.result.orders.forEach(order => {
-                if (order.fulfillments && order.fulfillments.length > 0) {
-                    const fulfillment = order.fulfillments[0];
-                    if (fulfillment.pickupDetails?.pickupAt) {
-                        const pickupTime = fulfillment.pickupDetails.pickupAt;
-                        ordersBySlot[pickupTime] = (ordersBySlot[pickupTime] || 0) + 1;
-                    }
+                if (order.fulfillments?.[0]?.pickupDetails?.pickupAt) {
+                    const pickupTime = order.fulfillments[0].pickupDetails.pickupAt;
+                    ordersBySlot[pickupTime] = (ordersBySlot[pickupTime] || 0) + 1;
                 }
             });
         }
         
         console.log('📦 Found', Object.keys(ordersBySlot).length, 'scheduled pickup slots with orders');
         
-        // Step 3: Generate available time slots
+        // Step 3: Generate available slots
         const availableSlots = [];
         let currentSlot = new Date(now.getTime() + minPrepTimeMinutes * 60 * 1000);
         
@@ -417,29 +414,47 @@ app.get('/api/available-pickup-times', async (req, res) => {
         const roundedMinutes = Math.ceil(minutes / slotIntervalMinutes) * slotIntervalMinutes;
         currentSlot.setMinutes(roundedMinutes, 0, 0);
         
-        // Generate slots for next 14 days
         const endDate = new Date(now);
         endDate.setDate(endDate.getDate() + maxDaysAhead);
         
         while (currentSlot < endDate && availableSlots.length < 200) {
-            const dayOfWeek = currentSlot.getDay(); // 0 = Sunday, 6 = Saturday
-            const hour = currentSlot.getHours();
-            const minute = currentSlot.getMinutes();
+            // ✅ FIX: Convert to local time for day/hour comparison
+            const localTimeString = currentSlot.toLocaleString('en-US', { 
+                timeZone: locationTimezone,
+                weekday: 'short',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            });
+            
+            // Parse local time components
+            const localDate = new Date(currentSlot.toLocaleString('en-US', { timeZone: locationTimezone }));
+            const dayOfWeek = currentSlot.toLocaleDateString('en-US', { timeZone: locationTimezone, weekday: 'short' }).toUpperCase();
+            
+            // Get local hour and minute
+            const localParts = currentSlot.toLocaleString('en-US', { 
+                timeZone: locationTimezone,
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            }).split(':');
+            const localHour = parseInt(localParts[0]);
+            const localMinute = parseInt(localParts[1]);
             
             // Check if this day/time is within business hours
             const isOpen = businessHours.some(period => {
-                // Square day mapping
-                const squareDayMap = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+                // Map Square day names (SUN, MON, etc.) to JavaScript short names
+                const dayMap = { 'SUN': 'SUN', 'MON': 'MON', 'TUE': 'TUE', 'WED': 'WED', 'THU': 'THU', 'FRI': 'FRI', 'SAT': 'SAT' };
                 
-                if (period.dayOfWeek !== squareDayMap[dayOfWeek]) {
+                if (period.dayOfWeek !== dayOfWeek) {
                     return false;
                 }
                 
-                // Parse start and end times (format: "HH:MM")
+                // Parse business hours
                 const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
                 const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
                 
-                const currentMinutes = hour * 60 + minute;
+                const currentMinutes = localHour * 60 + localMinute;
                 const startMinutes = startHour * 60 + startMin;
                 const endMinutes = endHour * 60 + endMin;
                 
@@ -447,7 +462,6 @@ app.get('/api/available-pickup-times', async (req, res) => {
             });
             
             if (isOpen) {
-                // Check if this slot has availability (< 2 orders)
                 const slotKey = currentSlot.toISOString();
                 const ordersInSlot = ordersBySlot[slotKey] || 0;
                 
@@ -460,17 +474,14 @@ app.get('/api/available-pickup-times', async (req, res) => {
                 }
             }
             
-            // Move to next 15-minute slot
+            // Move to next slot
             currentSlot = new Date(currentSlot.getTime() + slotIntervalMinutes * 60 * 1000);
         }
         
         console.log(`✅ Generated ${availableSlots.length} available pickup slots`);
         
-        // Return just the times for the app
-        const pickupTimes = availableSlots.map(slot => slot.time);
-        
         res.json({ 
-            pickupTimes: pickupTimes,
+            pickupTimes: availableSlots.map(slot => slot.time),
             metadata: {
                 totalSlots: availableSlots.length,
                 maxOrdersPerSlot: maxOrdersPerSlot,
@@ -479,7 +490,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
         });
         
     } catch (error) {
-        console.error('❌ Error generating pickup times:', error);
+        console.error('❌ Error:', error);
         res.status(500).json({ 
             error: 'Failed to generate pickup times',
             details: error.message 
