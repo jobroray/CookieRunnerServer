@@ -614,15 +614,17 @@ app.get('/api/available-pickup-times', async (req, res) => {
 // PAYMENT PROCESSING ENDPOINT
 app.post('/api/process-payment', async (req, res) => {
     try {
-        const { nonce, amount, customerId, customerEmail, pickupAt, discountCode } = req.body;
+        const { nonce, amount, customerId, customerEmail, pickupAt, discountCode, items } = req.body;
 
         console.log('💳 Processing payment...');
         console.log('   Amount:', amount);
         console.log('   Customer:', customerId);
         console.log('   Pickup:', pickupAt);
         console.log('   Discount:', discountCode || 'None');
+        console.log('   Items:', items?.length || 0);
 
-        if (!nonce || amount === undefined || amount === null || !customerId) {
+        if (!nonce || amount === undefined || amount === null || !customerId || !items || items.length === 0) {
+            console.log('❌ Missing fields:', { nonce: !!nonce, amount, customerId: !!customerId, itemCount: items?.length });
             return res.status(400).json({ error: 'Missing required payment fields' });
         }
 
@@ -650,9 +652,27 @@ app.post('/api/process-payment', async (req, res) => {
                 }
             } catch (discountError) {
                 console.warn('⚠️  Could not apply discount:', discountError.message);
-                // Continue without discount rather than failing the whole payment
             }
         }
+
+        // Build line items from cart
+        const lineItems = items.map((item, index) => {
+            console.log(`   Building line item ${index + 1}: ${item.name} x${item.quantity}`);
+            
+            const pricePerUnit = item.price / item.quantity;
+            const lineItem = {
+                name: item.name,
+                quantity: String(item.quantity),
+                basePriceMoney: {
+                    amount: BigInt(Math.round(pricePerUnit * 100)),
+                    currency: 'USD'
+                }
+            };
+
+            return lineItem;
+        });
+
+        console.log(`📦 Creating order with ${lineItems.length} line items...`);
 
         // Prepare order object
         const orderRequest = {
@@ -660,14 +680,7 @@ app.post('/api/process-payment', async (req, res) => {
             order: {
                 locationId: process.env.SQUARE_LOCATION_ID,
                 customerId: customerId,
-                lineItems: [{
-                    name: 'Cookie Order',
-                    quantity: '1',
-                    basePriceMoney: {
-                        amount: BigInt(Math.round(amount * 100)),
-                        currency: 'USD'
-                    }
-                }],
+                lineItems: lineItems,
                 // Add discount if we found it
                 discounts: discountCatalogId ? [{
                     catalogObjectId: discountCatalogId,
@@ -688,23 +701,48 @@ app.post('/api/process-payment', async (req, res) => {
             }
         };
 
-        console.log('📦 Creating order...');
+        console.log('📤 Creating order in Square...');
         const { result: orderResult } = await squareClient.ordersApi.createOrder(orderRequest);
-        console.log('✅ Order created:', orderResult.order.id);
+        console.log('✅ Order created in Square!');
+        console.log('   Order ID:', orderResult.order.id);
+        console.log('   Order total after discount:', Number(orderResult.order.totalMoney.amount) / 100);
 
         // Check if this is a free order (100% discount)
-        if (amount === 0) {
-            console.log('🎁 Free order (100% discount) - skipping payment creation');
+        const orderTotal = Number(orderResult.order.totalMoney.amount);
+        
+        if (orderTotal === 0) {
+            console.log('🎁 Free order detected - completing order without payment');
             
-            // For free orders, we still need to mark the order as paid
-            // We can do this by updating the order state or just return success
-            return res.json({
-                success: true,
-                orderId: orderResult.order.id,
-                paymentId: null, // No payment needed
-                totalMoney: orderResult.order.totalMoney,
-                isFreeOrder: true
-            });
+            // For free orders, we need to mark them as COMPLETED to properly track in Square
+            try {
+                const payOrderResult = await squareClient.ordersApi.payOrder(orderResult.order.id, {
+                    idempotencyKey: paymentIdempotencyKey,
+                    orderVersion: orderResult.order.version
+                    // No payment IDs needed for $0 orders
+                });
+                
+                console.log('✅ Free order marked as paid in Square');
+                console.log('   Order state:', payOrderResult.result.order.state);
+                
+                return res.json({
+                    success: true,
+                    orderId: payOrderResult.result.order.id,
+                    paymentId: null,
+                    totalMoney: payOrderResult.result.order.totalMoney,
+                    isFreeOrder: true
+                });
+            } catch (payError) {
+                console.error('❌ Failed to mark free order as paid:', payError.message);
+                // Return success anyway since order was created
+                return res.json({
+                    success: true,
+                    orderId: orderResult.order.id,
+                    paymentId: null,
+                    totalMoney: orderResult.order.totalMoney,
+                    isFreeOrder: true,
+                    warning: 'Order created but not marked as complete'
+                });
+            }
         }
 
         // For paid orders, create the payment
@@ -712,16 +750,17 @@ app.post('/api/process-payment', async (req, res) => {
             idempotencyKey: paymentIdempotencyKey,
             sourceId: nonce,
             amountMoney: {
-                amount: BigInt(Math.round(amount * 100)), // Discounted amount from client
+                amount: BigInt(orderTotal),
                 currency: 'USD'
             },
             customerId: customerId,
             orderId: orderResult.order.id
         };
 
-        console.log('💰 Processing payment...');
+        console.log('💰 Creating payment for $' + (orderTotal / 100));
         const { result: paymentResult } = await squareClient.paymentsApi.createPayment(paymentRequest);
-        console.log('✅ Payment successful:', paymentResult.payment.id);
+        console.log('✅ Payment successful!');
+        console.log('   Payment ID:', paymentResult.payment.id);
 
         res.json({
             success: true,
@@ -732,10 +771,18 @@ app.post('/api/process-payment', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ Payment processing error:', error);
+        console.error('❌ Payment processing error:');
+        console.error('   Message:', error.message);
+        console.error('   Stack:', error.stack);
+        
+        if (error.errors) {
+            console.error('   Square errors:', JSON.stringify(error.errors, null, 2));
+        }
+        
         res.status(500).json({ 
             error: 'Payment failed',
-            details: error.message 
+            details: error.message,
+            squareErrors: error.errors || []
         });
     }
 });
