@@ -209,6 +209,79 @@ app.post('/api/customer', async (req, res) => {
         });
     }
 });
+// DISCOUNT CODE VALIDATION ENDPOINT
+app.post('/api/validate-discount', async (req, res) => {
+    try {
+        const { discountCode, orderAmount } = req.body;
+
+        if (!discountCode || orderAmount === undefined) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        console.log(`🏷️  Validating discount code: ${discountCode} for order amount: $${orderAmount}`);
+
+        // Search for the discount in Square's catalog
+        const { result } = await squareClient.catalogApi.searchCatalogObjects({
+            objectTypes: ['DISCOUNT'],
+            query: {
+                textQuery: {
+                    keywords: [discountCode.toUpperCase()]
+                }
+            }
+        });
+
+        // Check if discount was found
+        if (!result.objects || result.objects.length === 0) {
+            console.log(`❌ Discount code "${discountCode}" not found`);
+            return res.status(404).json({ error: 'Discount code not found' });
+        }
+
+        const discount = result.objects[0];
+        const discountData = discount.discountData;
+
+        console.log(`✅ Found discount: ${discountData.name}, Type: ${discountData.discountType}`);
+
+        // Handle different discount types
+        if (discountData.discountType === 'FIXED_AMOUNT') {
+            // Fixed amount discount (e.g., $5 off)
+            const discountAmountMoney = discountData.amountMoney;
+            const discountAmount = Number(discountAmountMoney.amount) / 100; // Convert from cents
+
+            const finalDiscount = Math.min(discountAmount, orderAmount); // Don't exceed order total
+
+            console.log(`💰 Fixed amount discount: $${discountAmount} (applied: $${finalDiscount})`);
+
+            return res.json({
+                valid: true,
+                discountAmount: finalDiscount,
+                discountType: 'FIXED_AMOUNT',
+                discountValue: discountAmount
+            });
+        } else if (discountData.discountType === 'FIXED_PERCENTAGE') {
+            // Percentage discount (e.g., 20% off)
+            const percentage = parseFloat(discountData.percentage);
+            const discountAmount = (orderAmount * percentage) / 100;
+
+            console.log(`📊 Percentage discount: ${percentage}% (amount: $${discountAmount.toFixed(2)})`);
+
+            return res.json({
+                valid: true,
+                discountAmount: discountAmount,
+                discountType: 'PERCENTAGE',
+                discountPercentage: percentage
+            });
+        } else {
+            console.log(`⚠️  Unsupported discount type: ${discountData.discountType}`);
+            return res.status(400).json({ error: 'Unsupported discount type' });
+        }
+    } catch (error) {
+        console.error('❌ Error validating discount:', error);
+        res.status(500).json({ 
+            error: 'Failed to validate discount code',
+            details: error.message 
+        });
+    }
+});
 
 app.get('/api/orders/active', async (req, res) => {
     try {
@@ -537,6 +610,120 @@ app.get('/api/available-pickup-times', async (req, res) => {
         });
     }
 });
+
+// PAYMENT PROCESSING ENDPOINT
+app.post('/api/process-payment', async (req, res) => {
+    try {
+        const { nonce, amount, customerId, customerEmail, pickupAt, discountCode } = req.body;
+
+        console.log('💳 Processing payment...');
+        console.log('   Amount:', amount);
+        console.log('   Customer:', customerId);
+        console.log('   Pickup:', pickupAt);
+        console.log('   Discount:', discountCode || 'None');
+
+        if (!nonce || !amount || !customerId) {
+            return res.status(400).json({ error: 'Missing required payment fields' });
+        }
+
+        // Generate unique idempotency keys
+        const { randomUUID } = require('crypto');
+        const orderIdempotencyKey = randomUUID();
+        const paymentIdempotencyKey = randomUUID();
+
+        // Get discount catalog ID if discount code provided
+        let discountCatalogId = null;
+        if (discountCode) {
+            try {
+                const discountResult = await squareClient.catalogApi.searchCatalogObjects({
+                    objectTypes: ['DISCOUNT'],
+                    query: {
+                        textQuery: {
+                            keywords: [discountCode.toUpperCase()]
+                        }
+                    }
+                });
+
+                if (discountResult.result.objects && discountResult.result.objects.length > 0) {
+                    discountCatalogId = discountResult.result.objects[0].id;
+                    console.log(`🏷️  Applying discount: ${discountCode} (${discountCatalogId})`);
+                }
+            } catch (discountError) {
+                console.warn('⚠️  Could not apply discount:', discountError.message);
+                // Continue without discount rather than failing the whole payment
+            }
+        }
+
+        // Prepare order object
+        const orderRequest = {
+            idempotencyKey: orderIdempotencyKey,
+            order: {
+                locationId: process.env.SQUARE_LOCATION_ID,
+                customerId: customerId,
+                lineItems: [{
+                    name: 'Cookie Order',
+                    quantity: '1',
+                    basePriceMoney: {
+                        amount: BigInt(Math.round(amount * 100)),
+                        currency: 'USD'
+                    }
+                }],
+                // Add discount if we found it
+                discounts: discountCatalogId ? [{
+                    catalogObjectId: discountCatalogId,
+                    scope: 'ORDER'
+                }] : undefined,
+                // Add fulfillment details if pickup time provided
+                fulfillments: pickupAt ? [{
+                    type: 'PICKUP',
+                    state: 'PROPOSED',
+                    pickupDetails: {
+                        scheduleType: 'SCHEDULED',
+                        pickupAt: pickupAt,
+                        recipient: {
+                            customerId: customerId
+                        }
+                    }
+                }] : undefined
+            }
+        };
+
+        console.log('📦 Creating order...');
+        const { result: orderResult } = await squareClient.ordersApi.createOrder(orderRequest);
+        console.log('✅ Order created:', orderResult.order.id);
+
+        // Create payment for the order
+        const paymentRequest = {
+            idempotencyKey: paymentIdempotencyKey,
+            sourceId: nonce,
+            amountMoney: {
+                amount: BigInt(Math.round(amount * 100)), // Discounted amount from client
+                currency: 'USD'
+            },
+            customerId: customerId,
+            orderId: orderResult.order.id
+        };
+
+        console.log('💰 Processing payment...');
+        const { result: paymentResult } = await squareClient.paymentsApi.createPayment(paymentRequest);
+        console.log('✅ Payment successful:', paymentResult.payment.id);
+
+        res.json({
+            success: true,
+            orderId: orderResult.order.id,
+            paymentId: paymentResult.payment.id,
+            totalMoney: orderResult.order.totalMoney
+        });
+
+    } catch (error) {
+        console.error('❌ Payment processing error:', error);
+        res.status(500).json({ 
+            error: 'Payment failed',
+            details: error.message 
+        });
+    }
+});
+
 // START SERVER
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
