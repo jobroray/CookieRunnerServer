@@ -729,6 +729,111 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
         });
     }
 });
+// CALCULATE DELIVERY TIME AND CHECK AVAILABILITY
+app.get('/api/delivery-availability', async (req, res) => {
+    try {
+        const locationTimezone = 'America/Chicago';
+        const now = moment().tz(locationTimezone);
+        
+        // Configuration (use env vars with fallbacks)
+        const deliveryEnabled = process.env.DELIVERY_ENABLED === 'true';
+        const deliveryFee = parseFloat(process.env.DELIVERY_FEE) || 5.00;
+        const minPrepTimeMinutes = parseInt(process.env.MIN_PREP_TIME_MINUTES) || 35;
+        const deliveryMinTime = parseInt(process.env.DELIVERY_MIN_TIME) || 5;
+        const deliveryMaxTime = parseInt(process.env.DELIVERY_MAX_TIME) || 15;
+        
+        console.log('🚗 Checking delivery availability');
+        console.log('   Delivery enabled?', deliveryEnabled);
+        console.log('   Current time:', now.format('M/D/YYYY, h:mm:ss A'));
+        
+        if (!deliveryEnabled) {
+            console.log('❌ Delivery is currently disabled');
+            return res.json({
+                available: false,
+                reason: 'Delivery is not currently available'
+            });
+        }
+        
+        // Get location and business hours
+        const locationResult = await squareClient.locationsApi.retrieveLocation(
+            process.env.SQUARE_LOCATION_ID
+        );
+        
+        const location = locationResult.result.location;
+        const businessHours = location.businessHours?.periods || [];
+        
+        if (businessHours.length === 0) {
+            console.log('❌ Store is currently closed');
+            return res.json({
+                available: false,
+                reason: 'Store is currently closed'
+            });
+        }
+        
+        // Check if store is open now
+        const dayOfWeek = now.format('ddd').toUpperCase();
+        const currentMinutes = now.hour() * 60 + now.minute();
+        
+        const dayPeriods = businessHours.filter(period => period.dayOfWeek === dayOfWeek);
+        let isOpen = false;
+        
+        for (const period of dayPeriods) {
+            const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
+            const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
+            
+            const startMinutes = startHour * 60 + startMin;
+            const endMinutes = endHour * 60 + endMin;
+            
+            if (currentMinutes >= startMinutes && currentMinutes < endMinutes) {
+                isOpen = true;
+                break;
+            }
+        }
+        
+        if (!isOpen) {
+            console.log('❌ Store is not currently open');
+            return res.json({
+                available: false,
+                reason: 'Store is not currently open for delivery'
+            });
+        }
+        
+        // Calculate delivery window
+        // Start = now + prep time + min delivery time
+        // End = now + prep time + max delivery time
+        const totalMinTime = minPrepTimeMinutes + deliveryMinTime;
+        const totalMaxTime = minPrepTimeMinutes + deliveryMaxTime;
+        
+        const deliveryStart = now.clone().add(totalMinTime, 'minutes');
+        const deliveryEnd = now.clone().add(totalMaxTime, 'minutes');
+        
+        console.log('✅ Delivery available');
+        console.log('   Prep time:', minPrepTimeMinutes, 'minutes');
+        console.log('   Delivery time:', deliveryMinTime, '-', deliveryMaxTime, 'minutes');
+        console.log('   Total time:', totalMinTime, '-', totalMaxTime, 'minutes');
+        console.log('   Delivery window:', deliveryStart.format('h:mm A'), '-', deliveryEnd.format('h:mm A'));
+        
+        res.json({
+            available: true,
+            deliveryFee: deliveryFee,
+            estimatedMinutes: {
+                min: totalMinTime,
+                max: totalMaxTime
+            },
+            deliveryStart: deliveryStart.toISOString(),
+            deliveryEnd: deliveryEnd.toISOString(),
+            deliveryFeeFormatted: `$${deliveryFee.toFixed(2)}`
+        });
+        
+    } catch (error) {
+        console.error('❌ Error checking delivery availability:', error);
+        res.status(500).json({
+            available: false,
+            reason: 'Failed to check delivery availability',
+            details: error.message
+        });
+    }
+});
 
 // TEST: Check what fulfillment options Square provides
 app.get('/api/test-square-fulfillment', async (req, res) => {
