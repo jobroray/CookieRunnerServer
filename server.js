@@ -730,6 +730,38 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
     }
 });
 
+// TEST: Check what fulfillment options Square provides
+app.get('/api/test-square-fulfillment', async (req, res) => {
+    try {
+        console.log('🔍 Checking Square location for fulfillment settings...');
+        
+        const locationResult = await squareClient.locationsApi.retrieveLocation(
+            process.env.SQUARE_LOCATION_ID
+        );
+        
+        const location = locationResult.result.location;
+        
+        console.log('📋 Full location object:', JSON.stringify(location, null, 2));
+        
+        res.json({
+            locationId: location.id,
+            name: location.name,
+            capabilities: location.capabilities,
+            status: location.status,
+            businessHours: location.businessHours,
+            // Look for any fulfillment-related fields
+            allFields: Object.keys(location)
+        });
+        
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({
+            error: 'Failed to check location',
+            details: error.message
+        });
+    }
+});
+
 // PAYMENT PROCESSING ENDPOINT
 app.post('/api/process-payment', async (req, res) => {
     try {
