@@ -870,12 +870,27 @@ app.get('/api/test-square-fulfillment', async (req, res) => {
 // PAYMENT PROCESSING ENDPOINT
 app.post('/api/process-payment', async (req, res) => {
     try {
-        const { nonce, amount, customerId, customerEmail, pickupAt, discountCode, items } = req.body;
+        const { 
+            nonce, 
+            amount, 
+            customerId, 
+            customerEmail,
+            customerName,
+            customerPhone,
+            pickupAt, 
+            discountCode, 
+            items,
+            fulfillmentType,
+            deliveryAddress,
+            deliveryInstructions
+        } = req.body;
 
         console.log('💳 Processing payment...');
         console.log('   Amount:', amount);
         console.log('   Customer:', customerId);
+        console.log('   Fulfillment type:', fulfillmentType || 'pickup');
         console.log('   Pickup:', pickupAt);
+        console.log('   Delivery address:', deliveryAddress);
         console.log('   Discount:', discountCode || 'None');
         console.log('   Items:', items?.length || 0);
 
@@ -930,6 +945,46 @@ app.post('/api/process-payment', async (req, res) => {
 
         console.log(`📦 Creating order with ${lineItems.length} line items...`);
 
+        // Prepare fulfillment based on type
+        let fulfillments = undefined;
+        
+        if (fulfillmentType === 'delivery') {
+            console.log('🚗 Creating delivery fulfillment');
+            fulfillments = [{
+                type: 'DELIVERY',
+                state: 'PROPOSED',
+                deliveryDetails: {
+                    scheduleType: 'ASAP',
+                    recipient: {
+                        customerId: customerId,
+                        displayName: customerName || 'Customer',
+                        phoneNumber: customerPhone,
+                        address: {
+                            addressLine1: deliveryAddress?.street,
+                            addressLine2: deliveryAddress?.apt || undefined,
+                            locality: deliveryAddress?.city,
+                            administrativeDistrictLevel1: deliveryAddress?.state,
+                            postalCode: deliveryAddress?.zip
+                        }
+                    },
+                    note: deliveryInstructions || undefined
+                }
+            }];
+        } else if (pickupAt) {
+            console.log('📍 Creating pickup fulfillment');
+            fulfillments = [{
+                type: 'PICKUP',
+                state: 'PROPOSED',
+                pickupDetails: {
+                    scheduleType: 'SCHEDULED',
+                    pickupAt: pickupAt,
+                    recipient: {
+                        customerId: customerId
+                    }
+                }
+            }];
+        }
+
         // Prepare order object
         const orderRequest = {
             idempotencyKey: orderIdempotencyKey,
@@ -937,23 +992,11 @@ app.post('/api/process-payment', async (req, res) => {
                 locationId: process.env.SQUARE_LOCATION_ID,
                 customerId: customerId,
                 lineItems: lineItems,
-                // Add discount if we found it
                 discounts: discountCatalogId ? [{
                     catalogObjectId: discountCatalogId,
                     scope: 'ORDER'
                 }] : undefined,
-                // Add fulfillment details if pickup time provided
-                fulfillments: pickupAt ? [{
-                    type: 'PICKUP',
-                    state: 'PROPOSED',
-                    pickupDetails: {
-                        scheduleType: 'SCHEDULED',
-                        pickupAt: pickupAt,
-                        recipient: {
-                            customerId: customerId
-                        }
-                    }
-                }] : undefined
+                fulfillments: fulfillments
             }
         };
 
@@ -969,12 +1012,10 @@ app.post('/api/process-payment', async (req, res) => {
         if (orderTotal === 0) {
             console.log('🎁 Free order detected - completing order without payment');
             
-            // For free orders, we need to mark them as COMPLETED to properly track in Square
             try {
                 const payOrderResult = await squareClient.ordersApi.payOrder(orderResult.order.id, {
                     idempotencyKey: paymentIdempotencyKey,
                     orderVersion: orderResult.order.version
-                    // No payment IDs needed for $0 orders
                 });
                 
                 console.log('✅ Free order marked as paid in Square');
@@ -989,7 +1030,6 @@ app.post('/api/process-payment', async (req, res) => {
                 });
             } catch (payError) {
                 console.error('❌ Failed to mark free order as paid:', payError.message);
-                // Return success anyway since order was created
                 return res.json({
                     success: true,
                     orderId: orderResult.order.id,
