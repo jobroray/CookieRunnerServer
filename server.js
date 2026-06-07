@@ -611,77 +611,128 @@ app.get('/api/available-pickup-times', async (req, res) => {
     }
 });
 
-// CALCULATE IMMEDIATE PICKUP TIME (Let Square do it!)
+// CALCULATE IMMEDIATE PICKUP TIME (5-MINUTE INCREMENTS)
 app.get('/api/calculate-immediate-pickup', async (req, res) => {
     try {
-        console.log('⚡ Testing Square auto-calculation for pickup time...');
+        const locationTimezone = 'America/Chicago';
+        const now = moment().tz(locationTimezone);
         
-        // Create a DRAFT order with ASAP pickup to see if Square calculates the time
-        const { result } = await squareClient.ordersApi.createOrder({
-            idempotencyKey: `test-${Date.now()}`,
-            order: {
-                locationId: process.env.SQUARE_LOCATION_ID,
-                state: 'DRAFT', // Won't actually create an order
-                lineItems: [{
-                    name: 'Test Item',
-                    quantity: '1',
-                    basePriceMoney: {
-                        amount: 100n,
-                        currency: 'USD'
-                    }
-                }],
-                fulfillments: [{
-                    type: 'PICKUP',
-                    state: 'PROPOSED',
-                    pickupDetails: {
-                        scheduleType: 'ASAP', // Let Square calculate
-                        recipient: {
-                            displayName: 'Test Customer'
-                        }
-                    }
-                }]
-            }
-        });
+        console.log('⚡ Calculating immediate pickup time');
+        console.log('⏰ Current time:', now.format('M/D/YYYY, h:mm:ss A'));
         
-        console.log('📦 Square response:', JSON.stringify(result.order, null, 2));
+        // Get location to check for fulfillment settings
+        const locationResult = await squareClient.locationsApi.retrieveLocation(
+            process.env.SQUARE_LOCATION_ID
+        );
         
-        // Check if Square provided a pickupAt time
-        const pickupAt = result.order.fulfillments?.[0]?.pickupDetails?.pickupAt;
+        const location = locationResult.result.location;
         
-        if (pickupAt) {
-            console.log('✅ Square auto-calculated pickup time:', pickupAt);
-            
-            res.json({
-                readyTime: pickupAt,
-                source: 'square-auto-calculated',
-                message: 'Square calculated this time based on your prep time settings!'
-            });
-        } else {
-            console.log('❌ Square did NOT provide a pickup time, falling back to manual calculation');
-            
-            // Fallback to manual calculation
-            const moment = require('moment-timezone');
-            const locationTimezone = 'America/Chicago';
-            const now = moment().tz(locationTimezone);
-            const minPrepTimeMinutes = 35; // Fallback prep time
-            
-            let readyTime = now.clone().add(minPrepTimeMinutes, 'minutes');
-            
-            // Round UP to nearest 5-minute increment
-            const currentMinute = readyTime.minute();
-            const roundedMinute = Math.ceil(currentMinute / 5) * 5;
-            readyTime.minute(roundedMinute).second(0).millisecond(0);
-            
-            res.json({
-                readyTime: readyTime.toISOString(),
-                source: 'manual-calculation',
-                message: 'Square did not provide a time, so we calculated it manually',
-                prepTimeMinutes: minPrepTimeMinutes
-            });
+        // Try to read prep time from Square's fulfillment configuration
+        // Square stores this in location.capabilities or fulfillment settings
+        let minPrepTimeMinutes = 35; // Default fallback
+        
+        // Check if Square provides prep time in location data
+        if (location.capabilities?.includes('CREDIT_CARD_PROCESSING')) {
+            console.log('📋 Location capabilities:', location.capabilities);
         }
         
+        // Log full location object to see what Square provides
+        console.log('📍 Location data keys:', Object.keys(location));
+        
+        // For now, use environment variable or default
+        minPrepTimeMinutes = parseInt(process.env.MIN_PREP_TIME_MINUTES) || 35;
+        
+        console.log('⏱  Prep time:', minPrepTimeMinutes, 'minutes');
+        
+        const immediateSlotInterval = 5; // 5-minute increments for immediate pickup
+        const businessHours = location.businessHours?.periods || [];
+        
+        if (businessHours.length === 0) {
+            return res.status(400).json({ error: 'Store is currently closed' });
+        }
+        
+        // Calculate ready time = now + prep time
+        let readyTime = now.clone().add(minPrepTimeMinutes, 'minutes');
+        
+        console.log('📍 Initial ready time:', readyTime.format('M/D/YYYY, h:mm:ss A'));
+        
+        // Round UP to nearest 5-minute increment
+        const currentMinute = readyTime.minute();
+        const roundedMinute = Math.ceil(currentMinute / immediateSlotInterval) * immediateSlotInterval;
+        readyTime.minute(roundedMinute).second(0).millisecond(0);
+        
+        console.log('🎯 Rounded ready time:', readyTime.format('M/D/YYYY, h:mm A'));
+        
+        // Check if this time falls within business hours
+        const dayOfWeek = readyTime.format('ddd').toUpperCase();
+        const readyMinutes = readyTime.hour() * 60 + readyTime.minute();
+        
+        const dayPeriods = businessHours.filter(period => period.dayOfWeek === dayOfWeek);
+        let isWithinHours = false;
+        
+        for (const period of dayPeriods) {
+            const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
+            const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
+            
+            const startMinutes = startHour * 60 + startMin;
+            const endMinutes = endHour * 60 + endMin;
+            
+            if (readyMinutes >= startMinutes && readyMinutes < endMinutes) {
+                isWithinHours = true;
+                break;
+            }
+        }
+        
+        if (!isWithinHours) {
+            console.log('⚠️ Ready time falls outside business hours');
+            // Find next opening time
+            let daysChecked = 0;
+            let nextOpenTime = null;
+            
+            while (daysChecked < 7 && !nextOpenTime) {
+                const checkDay = now.clone().add(daysChecked, 'days');
+                const checkDayOfWeek = checkDay.format('ddd').toUpperCase();
+                const periodsForDay = businessHours.filter(p => p.dayOfWeek === checkDayOfWeek);
+                
+                if (periodsForDay.length > 0) {
+                    const earliestPeriod = periodsForDay.sort((a, b) => {
+                        return a.startLocalTime.localeCompare(b.startLocalTime);
+                    })[0];
+                    
+                    const [hour, min] = earliestPeriod.startLocalTime.split(':').map(Number);
+                    nextOpenTime = checkDay.clone()
+                        .hour(hour)
+                        .minute(min)
+                        .second(0)
+                        .millisecond(0)
+                        .add(minPrepTimeMinutes, 'minutes');
+                    
+                    const nextMinute = nextOpenTime.minute();
+                    const nextRounded = Math.ceil(nextMinute / immediateSlotInterval) * immediateSlotInterval;
+                    nextOpenTime.minute(nextRounded);
+                }
+                
+                daysChecked++;
+            }
+            
+            if (nextOpenTime) {
+                readyTime = nextOpenTime;
+                console.log('✅ Next available time:', readyTime.format('ddd M/D/YYYY, h:mm A'));
+            } else {
+                return res.status(400).json({ error: 'No available pickup times in the next week' });
+            }
+        }
+        
+        console.log(`✅ Immediate pickup ready time: ${readyTime.format('ddd M/D/YYYY, h:mm A')}`);
+        
+        res.json({
+            readyTime: readyTime.toISOString(),
+            prepTimeMinutes: minPrepTimeMinutes,
+            slotInterval: immediateSlotInterval
+        });
+        
     } catch (error) {
-        console.error('❌ Error:', error);
+        console.error('❌ Error calculating immediate pickup:', error);
         res.status(500).json({
             error: 'Failed to calculate pickup time',
             details: error.message
