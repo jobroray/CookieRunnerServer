@@ -611,59 +611,43 @@ app.get('/api/available-pickup-times', async (req, res) => {
     }
 });
 
-// CALCULATE IMMEDIATE PICKUP TIME (5-MINUTE INCREMENTS)
+// CALCULATE IMMEDIATE PICKUP TIME (Just get first available slot!)
 app.get('/api/calculate-immediate-pickup', async (req, res) => {
     try {
+        console.log('⚡ Getting first available pickup slot for ASAP order');
+        
+        // Reuse the same logic as available-pickup-times
         const locationTimezone = 'America/Chicago';
         const now = moment().tz(locationTimezone);
+        const minPrepTimeMinutes = parseInt(process.env.MIN_PREP_TIME_MINUTES) || 35;
+        const immediateSlotInterval = 5; // 5-minute increments for ASAP
         
-        console.log('⚡ Calculating immediate pickup time');
-        console.log('⏰ Current time:', now.format('M/D/YYYY, h:mm:ss A'));
-        
-        // Get location to check for fulfillment settings
+        // Get location and business hours
         const locationResult = await squareClient.locationsApi.retrieveLocation(
             process.env.SQUARE_LOCATION_ID
         );
         
         const location = locationResult.result.location;
-        
-        // Try to read prep time from Square's fulfillment configuration
-        // Square stores this in location.capabilities or fulfillment settings
-        let minPrepTimeMinutes = 35; // Default fallback
-        
-        // Check if Square provides prep time in location data
-        if (location.capabilities?.includes('CREDIT_CARD_PROCESSING')) {
-            console.log('📋 Location capabilities:', location.capabilities);
-        }
-        
-        // Log full location object to see what Square provides
-        console.log('📍 Location data keys:', Object.keys(location));
-        
-        // For now, use environment variable or default
-        minPrepTimeMinutes = parseInt(process.env.MIN_PREP_TIME_MINUTES) || 35;
-        
-        console.log('⏱  Prep time:', minPrepTimeMinutes, 'minutes');
-        
-        const immediateSlotInterval = 5; // 5-minute increments for immediate pickup
         const businessHours = location.businessHours?.periods || [];
         
         if (businessHours.length === 0) {
             return res.status(400).json({ error: 'Store is currently closed' });
         }
         
-        // Calculate ready time = now + prep time
+        // Start from now + prep time
         let readyTime = now.clone().add(minPrepTimeMinutes, 'minutes');
         
+        console.log('⏱  Prep time:', minPrepTimeMinutes, 'minutes');
         console.log('📍 Initial ready time:', readyTime.format('M/D/YYYY, h:mm:ss A'));
         
-        // Round UP to nearest 5-minute increment
+        // Round UP to nearest 5-minute increment (ASAP uses 5-min, not 15-min)
         const currentMinute = readyTime.minute();
         const roundedMinute = Math.ceil(currentMinute / immediateSlotInterval) * immediateSlotInterval;
         readyTime.minute(roundedMinute).second(0).millisecond(0);
         
-        console.log('🎯 Rounded ready time:', readyTime.format('M/D/YYYY, h:mm A'));
+        console.log('🎯 Rounded ready time (5-min):', readyTime.format('M/D/YYYY, h:mm A'));
         
-        // Check if this time falls within business hours
+        // Check if within business hours
         const dayOfWeek = readyTime.format('ddd').toUpperCase();
         const readyMinutes = readyTime.hour() * 60 + readyTime.minute();
         
@@ -678,14 +662,19 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
             const endMinutes = endHour * 60 + endMin;
             
             if (readyMinutes >= startMinutes && readyMinutes < endMinutes) {
-                isWithinHours = true;
-                break;
+                // Make sure there's enough time after opening for prep
+                const minutesSinceOpening = readyMinutes - startMinutes;
+                if (minutesSinceOpening >= minPrepTimeMinutes) {
+                    isWithinHours = true;
+                    break;
+                }
             }
         }
         
         if (!isWithinHours) {
-            console.log('⚠️ Ready time falls outside business hours');
-            // Find next opening time
+            console.log('⚠️ Ready time falls outside business hours, finding next opening');
+            
+            // Find next opening
             let daysChecked = 0;
             let nextOpenTime = null;
             
@@ -707,6 +696,7 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
                         .millisecond(0)
                         .add(minPrepTimeMinutes, 'minutes');
                     
+                    // Round to 5-min increment
                     const nextMinute = nextOpenTime.minute();
                     const nextRounded = Math.ceil(nextMinute / immediateSlotInterval) * immediateSlotInterval;
                     nextOpenTime.minute(nextRounded);
@@ -723,7 +713,7 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
             }
         }
         
-        console.log(`✅ Immediate pickup ready time: ${readyTime.format('ddd M/D/YYYY, h:mm A')}`);
+        console.log(`✅ ASAP pickup time: ${readyTime.format('ddd M/D/YYYY, h:mm A')}`);
         
         res.json({
             readyTime: readyTime.toISOString(),
