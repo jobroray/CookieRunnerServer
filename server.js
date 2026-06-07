@@ -611,6 +611,84 @@ app.get('/api/available-pickup-times', async (req, res) => {
     }
 });
 
+// CALCULATE IMMEDIATE PICKUP TIME (Let Square do it!)
+app.get('/api/calculate-immediate-pickup', async (req, res) => {
+    try {
+        console.log('⚡ Testing Square auto-calculation for pickup time...');
+        
+        // Create a DRAFT order with ASAP pickup to see if Square calculates the time
+        const { result } = await squareClient.ordersApi.createOrder({
+            idempotencyKey: `test-${Date.now()}`,
+            order: {
+                locationId: process.env.SQUARE_LOCATION_ID,
+                state: 'DRAFT', // Won't actually create an order
+                lineItems: [{
+                    name: 'Test Item',
+                    quantity: '1',
+                    basePriceMoney: {
+                        amount: 100n,
+                        currency: 'USD'
+                    }
+                }],
+                fulfillments: [{
+                    type: 'PICKUP',
+                    state: 'PROPOSED',
+                    pickupDetails: {
+                        scheduleType: 'ASAP', // Let Square calculate
+                        recipient: {
+                            displayName: 'Test Customer'
+                        }
+                    }
+                }]
+            }
+        });
+        
+        console.log('📦 Square response:', JSON.stringify(result.order, null, 2));
+        
+        // Check if Square provided a pickupAt time
+        const pickupAt = result.order.fulfillments?.[0]?.pickupDetails?.pickupAt;
+        
+        if (pickupAt) {
+            console.log('✅ Square auto-calculated pickup time:', pickupAt);
+            
+            res.json({
+                readyTime: pickupAt,
+                source: 'square-auto-calculated',
+                message: 'Square calculated this time based on your prep time settings!'
+            });
+        } else {
+            console.log('❌ Square did NOT provide a pickup time, falling back to manual calculation');
+            
+            // Fallback to manual calculation
+            const moment = require('moment-timezone');
+            const locationTimezone = 'America/Chicago';
+            const now = moment().tz(locationTimezone);
+            const minPrepTimeMinutes = 35; // Fallback prep time
+            
+            let readyTime = now.clone().add(minPrepTimeMinutes, 'minutes');
+            
+            // Round UP to nearest 5-minute increment
+            const currentMinute = readyTime.minute();
+            const roundedMinute = Math.ceil(currentMinute / 5) * 5;
+            readyTime.minute(roundedMinute).second(0).millisecond(0);
+            
+            res.json({
+                readyTime: readyTime.toISOString(),
+                source: 'manual-calculation',
+                message: 'Square did not provide a time, so we calculated it manually',
+                prepTimeMinutes: minPrepTimeMinutes
+            });
+        }
+        
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({
+            error: 'Failed to calculate pickup time',
+            details: error.message
+        });
+    }
+});
+
 // PAYMENT PROCESSING ENDPOINT
 app.post('/api/process-payment', async (req, res) => {
     try {
