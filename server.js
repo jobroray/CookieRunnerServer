@@ -125,9 +125,35 @@ app.get('/api/inventory', async (req, res) => {
 
             const isFeaturedCookie = (itemData.categories || []).some(cat => categoryMap[cat.id] === "Featured") || 
                                      (categoryMap[itemData.categoryId] === "Featured");
-            const inventory = inventoryMap[variation.id];
-            const isStockManaged = variationData.trackInventory === true;
-            const stockQuantity = (inventory && inventory.state === 'IN_STOCK') ? inventory.quantity : null;
+
+            // Try to find inventory data by variation ID
+let inventory = inventoryMap[variation.id];
+
+// If not found by variation ID, try the main item ID
+if (!inventory) {
+    inventory = inventoryMap[item.id];
+}
+
+const isStockManaged = variationData.trackInventory === true;
+
+// Debug logging to see what we're getting
+console.log(`📊 ${itemData.name}:`);
+console.log(`   Item ID: ${item.id}`);
+console.log(`   Variation ID: ${variation.id}`);
+console.log(`   Tracks inventory: ${isStockManaged}`);
+console.log(`   Found inventory: ${!!inventory}`);
+if (inventory) {
+    console.log(`   State: ${inventory.state}`);
+    console.log(`   Quantity: ${inventory.quantity}`);
+}
+
+// Get stock quantity if inventory tracking is enabled and we have data
+let stockQuantity = null;
+if (isStockManaged && inventory) {
+    // Use the quantity regardless of state - let the quantity itself determine availability
+    stockQuantity = inventory.quantity;
+}
+
 
             return {
                 id: item.id,
