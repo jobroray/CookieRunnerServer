@@ -80,35 +80,54 @@ app.get('/api/inventory', async (req, res) => {
         }
         let inventoryMap = {};
 try {
+    console.log('🔍 Fetching inventory for location:', process.env.SQUARE_LOCATION_ID);
+    
     const inventoryResult = await squareClient.inventoryApi.batchRetrieveInventoryCounts({
         locationIds: [process.env.SQUARE_LOCATION_ID]
     });
     
+    console.log('📦 Raw inventory response:', JSON.stringify(inventoryResult.result, null, 2));
+    
     if (inventoryResult.result.counts) {
-        console.log(`📦 Raw inventory counts received: ${inventoryResult.result.counts.length}`);
+        console.log(`📦 Total inventory count records: ${inventoryResult.result.counts.length}`);
         
-        // Group by catalog object ID and sum quantities for IN_STOCK items
         inventoryResult.result.counts.forEach(count => {
-            console.log(`   ${count.catalogObjectId}: ${count.quantity} (${count.state})`);
+            console.log(`\n🏷️  Catalog Object ID: ${count.catalogObjectId}`);
+            console.log(`   Quantity: ${count.quantity}`);
+            console.log(`   State: ${count.state}`);
+            console.log(`   Location: ${count.locationId}`);
             
-            // Only count items that are actually available (IN_STOCK)
-            if (count.state === 'IN_STOCK') {
-                if (!inventoryMap[count.catalogObjectId]) {
+            // Store inventory by catalog object ID
+            // If multiple records exist for same ID, keep the one with highest quantity
+            if (!inventoryMap[count.catalogObjectId]) {
+                inventoryMap[count.catalogObjectId] = {
+                    quantity: Number(count.quantity) || 0,
+                    state: count.state
+                };
+            } else {
+                // If we already have this ID, take the higher quantity
+                const newQty = Number(count.quantity) || 0;
+                if (newQty > inventoryMap[count.catalogObjectId].quantity) {
                     inventoryMap[count.catalogObjectId] = {
-                        quantity: 0,
+                        quantity: newQty,
                         state: count.state
                     };
                 }
-                // Sum up quantities if there are multiple IN_STOCK records
-                inventoryMap[count.catalogObjectId].quantity += Number(count.quantity) || 0;
             }
         });
+        
+        console.log('\n📊 Final Inventory Map:');
+        Object.keys(inventoryMap).forEach(id => {
+            console.log(`   ${id}: ${inventoryMap[id].quantity} (${inventoryMap[id].state})`);
+        });
+    } else {
+        console.log('⚠️  No inventory counts returned from Square');
     }
     
-    console.log(`📦 Processed inventory for ${Object.keys(inventoryMap).length} unique items`);
-    console.log('📊 Final inventory map:', JSON.stringify(inventoryMap, null, 2));
+    console.log(`\n✅ Processed inventory for ${Object.keys(inventoryMap).length} items`);
 } catch (invError) {
     console.warn('⚠️ Could not fetch inventory counts:', invError.message);
+    console.error(invError);
 }
         console.log('🔑 Inventory Map Keys:', Object.keys(inventoryMap));
 console.log('📋 Full Inventory Map:', JSON.stringify(inventoryMap, null, 2));
