@@ -79,29 +79,40 @@ app.get('/api/inventory', async (req, res) => {
             });
         }
         let inventoryMap = {};
-        try {
-            const inventoryResult = await squareClient.inventoryApi.batchRetrieveInventoryCounts({
-                locationIds: [process.env.SQUARE_LOCATION_ID]
-            });
+try {
+    const inventoryResult = await squareClient.inventoryApi.batchRetrieveInventoryCounts({
+        locationIds: [process.env.SQUARE_LOCATION_ID]
+    });
+    
+    if (inventoryResult.result.counts) {
+        console.log(`📦 Raw inventory counts received: ${inventoryResult.result.counts.length}`);
+        
+        // Group by catalog object ID and sum quantities for IN_STOCK items
+        inventoryResult.result.counts.forEach(count => {
+            console.log(`   ${count.catalogObjectId}: ${count.quantity} (${count.state})`);
             
-            if (inventoryResult.result.counts) {
-                inventoryResult.result.counts.forEach(count => {
+            // Only count items that are actually available (IN_STOCK)
+            if (count.state === 'IN_STOCK') {
+                if (!inventoryMap[count.catalogObjectId]) {
                     inventoryMap[count.catalogObjectId] = {
-                        quantity: Number(count.quantity) || 0,
-                        state: count.state // SOLD, IN_STOCK, etc.
+                        quantity: 0,
+                        state: count.state
                     };
-                });
+                }
+                // Sum up quantities if there are multiple IN_STOCK records
+                inventoryMap[count.catalogObjectId].quantity += Number(count.quantity) || 0;
             }
-            
-            console.log(`📦 Fetched inventory for ${Object.keys(inventoryMap).length} items`);
-console.log('🔑 Inventory Map Keys:', Object.keys(inventoryMap));
+        });
+    }
+    
+    console.log(`📦 Processed inventory for ${Object.keys(inventoryMap).length} unique items`);
+    console.log('📊 Final inventory map:', JSON.stringify(inventoryMap, null, 2));
+} catch (invError) {
+    console.warn('⚠️ Could not fetch inventory counts:', invError.message);
+}
+        console.log('🔑 Inventory Map Keys:', Object.keys(inventoryMap));
 console.log('📋 Full Inventory Map:', JSON.stringify(inventoryMap, null, 2));
 
-        } catch (invError) {
-            console.warn('⚠️ Could not fetch inventory counts:', invError.message);
-            // Continue without inventory data
-        }
-        
         const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(item => {
             const itemData = item.itemData;
             const variation = itemData.variations[0];
