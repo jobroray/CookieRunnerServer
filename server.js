@@ -94,6 +94,9 @@ app.get('/api/inventory', async (req, res) => {
             }
             
             console.log(`📦 Fetched inventory for ${Object.keys(inventoryMap).length} items`);
+console.log('🔑 Inventory Map Keys:', Object.keys(inventoryMap));
+console.log('📋 Full Inventory Map:', JSON.stringify(inventoryMap, null, 2));
+
         } catch (invError) {
             console.warn('⚠️ Could not fetch inventory counts:', invError.message);
             // Continue without inventory data
