@@ -160,6 +160,7 @@ console.log('📋 Full Inventory Map:', JSON.stringify(inventoryMap, null, 2));
                                      (categoryMap[itemData.categoryId] === "Featured");
 
             // Try to find inventory data by variation ID
+// Try to find inventory data by variation ID
 let inventory = inventoryMap[variation.id];
 
 // If not found by variation ID, try the main item ID
@@ -167,24 +168,34 @@ if (!inventory) {
     inventory = inventoryMap[item.id];
 }
 
-const isStockManaged = variationData.trackInventory === true;
+// Smart stock management detection:
+// If Square returns inventory data, treat it as managed regardless of trackInventory flag
+const hasInventoryData = !!inventory;
+const trackInventoryFlag = variationData.trackInventory === true;
+const isStockManaged = hasInventoryData || trackInventoryFlag;
 
 // Debug logging to see what we're getting
 console.log(`📊 ${itemData.name}:`);
 console.log(`   Item ID: ${item.id}`);
 console.log(`   Variation ID: ${variation.id}`);
-console.log(`   Tracks inventory: ${isStockManaged}`);
-console.log(`   Found inventory: ${!!inventory}`);
+console.log(`   trackInventory flag: ${trackInventoryFlag}`);
+console.log(`   Found inventory data: ${hasInventoryData}`);
+console.log(`   Final isStockManaged: ${isStockManaged}`);
 if (inventory) {
     console.log(`   State: ${inventory.state}`);
     console.log(`   Quantity: ${inventory.quantity}`);
 }
 
-// Get stock quantity if inventory tracking is enabled and we have data
+// Get stock quantity - if we have inventory data, use it
 let stockQuantity = null;
-if (isStockManaged && inventory) {
-    // Use the quantity regardless of state - let the quantity itself determine availability
+if (inventory) {
     stockQuantity = inventory.quantity;
+    console.log(`   ✅ Using stock quantity: ${stockQuantity}`);
+} else if (isStockManaged) {
+    console.log(`   ⚠️  Stock managed but no data - treating as out of stock`);
+    stockQuantity = 0; // Managed but no data = out of stock
+} else {
+    console.log(`   ℹ️  Not managed - treating as unlimited`);
 }
 
 
