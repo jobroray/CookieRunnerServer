@@ -197,7 +197,7 @@ const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(ite
     const defaultVariation = variations[0];
     
     const imageId = itemData.imageIds ? itemData.imageIds[0] : null;
-    const imageUrl = imageId ? imageMap[imageId] : "cupcake"; 
+    const imageUrl = imageId ? imageMap[imageId] : null; 
     
     const linkedGroups = (itemData.modifierListInfo || [])
         .map(info => {
