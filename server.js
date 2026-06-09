@@ -92,7 +92,6 @@ app.get('/api/inventory', async (req, res) => {
         modifiers: options,
         selectionType: obj.modifierListData.selectionType || 'MULTIPLE'
     };
-}
         let inventoryMap = {};
 try {
     console.log('🔍 Fetching inventory for location:', process.env.SQUARE_LOCATION_ID);
