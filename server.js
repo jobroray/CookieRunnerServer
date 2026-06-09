@@ -198,6 +198,10 @@ const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(ite
     
     const imageId = itemData.imageIds ? itemData.imageIds[0] : null;
     const imageUrl = imageId ? imageMap[imageId] : null; 
+
+console.log(`📸 Item: ${itemData.name}`);
+console.log(`   Image ID: ${imageId}`);
+console.log(`   Image URL: ${imageUrl}`);
     
     const linkedGroups = (itemData.modifierListInfo || [])
         .map(info => {
