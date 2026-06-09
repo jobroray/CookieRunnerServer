@@ -725,7 +725,7 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
         }
         
         // Get existing orders
-        const futureDate = moment().add(1, 'days').toDate();
+        const futureDate = moment().add(7, 'days').toDate();
         const ordersResult = await squareClient.ordersApi.searchOrders({
             locationIds: [process.env.SQUARE_LOCATION_ID],
             query: {
@@ -766,7 +766,7 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
         // Find first available slot
         let foundSlot = false;
         let iterations = 0;
-        const maxIterations = 200;
+        const maxIterations = 1000;
         
         while (!foundSlot && iterations < maxIterations) {
             iterations++;
@@ -811,7 +811,13 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
         }
         
         if (!foundSlot) {
-            return res.status(400).json({ error: 'No available pickup times in next 24 hours' });
+            console.log(`❌ No slot found after ${iterations} iterations`);
+            console.log(`   Last checked time: ${candidateTime.format('ddd M/D h:mm A')}`);
+            
+            return res.status(400).json({ 
+                error: 'No available pickup times in the next 7 days',
+                details: 'Store may be closed or fully booked. Please contact us.'
+            });
         }
         
         res.json({
