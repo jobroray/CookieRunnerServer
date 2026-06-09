@@ -144,15 +144,29 @@ try {
         console.log('🔑 Inventory Map Keys:', Object.keys(inventoryMap));
 console.log('📋 Full Inventory Map:', JSON.stringify(inventoryMap, null, 2));
 
-   const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(item => {
+const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(item => {
     const itemData = item.itemData;
     
     // Map ALL variations for this item
     const variations = (itemData.variations || []).map(variation => {
         const variationData = variation.itemVariationData;
-        const inventory = inventoryMap[variation.id];
-        const isStockManaged = variationData.trackInventory === true;
-        const stockQuantity = inventory ? inventory.quantity : null;
+        
+        // Get inventory for this specific variation
+        let inventory = inventoryMap[variation.id];
+        if (!inventory) {
+            inventory = inventoryMap[item.id];
+        }
+        
+        const trackInventoryFlag = variationData.trackInventory === true;
+        const hasInventoryData = !!inventory;
+        const isStockManaged = hasInventoryData || trackInventoryFlag;
+        
+        let stockQuantity = null;
+        if (inventory) {
+            stockQuantity = inventory.quantity;
+        } else if (isStockManaged) {
+            stockQuantity = 0;
+        }
         
         return {
             id: variation.id,
@@ -166,83 +180,44 @@ console.log('📋 Full Inventory Map:', JSON.stringify(inventoryMap, null, 2));
     
     // Use first variation as default for backward compatibility
     const defaultVariation = variations[0];
+    
+    const imageId = itemData.imageIds ? itemData.imageIds[0] : null;
+    const imageUrl = imageId ? imageMap[imageId] : "cupcake"; 
+    
+    const linkedGroups = (itemData.modifierListInfo || [])
+        .map(info => {
+            const baseGroup = modifierGroupMap[info.modifierListId];
+            if (!baseGroup) return null;
             
-            const imageId = itemData.imageIds ? itemData.imageIds[0] : null;
-            const imageUrl = imageId ? imageMap[imageId] : "cupcake"; 
-            
-            const linkedGroups = (itemData.modifierListInfo || [])
-                .map(info => {
-                    const baseGroup = modifierGroupMap[info.modifierListId];
-                    if (!baseGroup) return null;
-                    
-                    return {
-                        id: baseGroup.id,
-                        name: baseGroup.name,
-                        modifiers: baseGroup.modifiers,
-                        selectionType: (info.selectionType || baseGroup.selectionType) === 'SINGLE' ? 'single' : 'multiple',
-                        minSelections: info.minSelectedModifiers !== undefined ? info.minSelectedModifiers : null,
-                        maxSelections: info.maxSelectedModifiers !== undefined ? info.maxSelectedModifiers : null
-                    };
-                })
-                .filter(Boolean);
-
-            const isFeaturedCookie = (itemData.categories || []).some(cat => categoryMap[cat.id] === "Featured") || 
-                                     (categoryMap[itemData.categoryId] === "Featured");
-
-            // Try to find inventory data by variation ID
-// Try to find inventory data by variation ID
-let inventory = inventoryMap[variation.id];
-
-// If not found by variation ID, try the main item ID
-if (!inventory) {
-    inventory = inventoryMap[item.id];
-}
-
-// Smart stock management detection:
-// If Square returns inventory data, treat it as managed regardless of trackInventory flag
-const hasInventoryData = !!inventory;
-const trackInventoryFlag = variationData.trackInventory === true;
-const isStockManaged = hasInventoryData || trackInventoryFlag;
-
-// Debug logging to see what we're getting
-console.log(`📊 ${itemData.name}:`);
-console.log(`   Item ID: ${item.id}`);
-console.log(`   Variation ID: ${variation.id}`);
-console.log(`   trackInventory flag: ${trackInventoryFlag}`);
-console.log(`   Found inventory data: ${hasInventoryData}`);
-console.log(`   Final isStockManaged: ${isStockManaged}`);
-if (inventory) {
-    console.log(`   State: ${inventory.state}`);
-    console.log(`   Quantity: ${inventory.quantity}`);
-}
-
-// Get stock quantity - if we have inventory data, use it
-let stockQuantity = null;
-if (inventory) {
-    stockQuantity = inventory.quantity;
-    console.log(`   ✅ Using stock quantity: ${stockQuantity}`);
-} else if (isStockManaged) {
-    console.log(`   ⚠️  Stock managed but no data - treating as out of stock`);
-    stockQuantity = 0; // Managed but no data = out of stock
-} else {
-    console.log(`   ℹ️  Not managed - treating as unlimited`);
-}
-
-
             return {
-                id: item.id,
-                name: itemData.name,
-                category: (itemData.categoryId || itemData.categories?.[0]?.id) ? (categoryMap[itemData.categoryId || itemData.categories?.[0]?.id] || "Other Cookies") : "Other Cookies",
-                subtitle: itemData.description || "Freshly baked",
-                price: Number(variationData.priceMoney.amount) / 100, 
-                imagePath: imageUrl,
-                description: itemData.description || "",
-                modifierGroups: linkedGroups.length > 0 ? linkedGroups : null,
-                isFeatured: isFeaturedCookie,
-                stockQuantity: stockQuantity,
-                isStockManaged: isStockManaged
+                id: baseGroup.id,
+                name: baseGroup.name,
+                modifiers: baseGroup.modifiers,
+                selectionType: (info.selectionType || baseGroup.selectionType) === 'SINGLE' ? 'single' : 'multiple',
+                minSelections: info.minSelectedModifiers !== undefined ? info.minSelectedModifiers : null,
+                maxSelections: info.maxSelectedModifiers !== undefined ? info.maxSelectedModifiers : null
             };
-        });
+        })
+        .filter(Boolean);
+
+    const isFeaturedCookie = (itemData.categories || []).some(cat => categoryMap[cat.id] === "Featured") || 
+                             (categoryMap[itemData.categoryId] === "Featured");
+
+    return {
+        id: item.id,
+        name: itemData.name,
+        category: (itemData.categoryId || itemData.categories?.[0]?.id) ? (categoryMap[itemData.categoryId || itemData.categories?.[0]?.id] || "Other Cookies") : "Other Cookies",
+        subtitle: itemData.description || "Freshly baked",
+        price: defaultVariation.price,  // ✅ Use default variation price
+        imagePath: imageUrl,
+        description: itemData.description || "",
+        modifierGroups: linkedGroups.length > 0 ? linkedGroups : null,
+        isFeatured: isFeaturedCookie,
+        stockQuantity: defaultVariation.stockQuantity,  // ✅ Use default variation stock
+        isStockManaged: defaultVariation.isStockManaged,  // ✅ Use default variation stock tracking
+        variations: variations  // ✅ NEW: All size/type options
+    };
+});
         
         console.log(`✅ Fetched ${formattedItems.length} items from Square`);
         formattedItems.forEach(item => {
