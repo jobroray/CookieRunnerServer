@@ -56,8 +56,9 @@ app.get('/api/inventory', async (req, res) => {
                 }
                 
                 if (obj.type === 'MODIFIER_LIST' && obj.modifierListData) {
-    // Filter and map modifiers, excluding those absent at current location
-    const options = (obj.modifierListData.modifiers || [])
+    const modifiers = obj.modifierListData.modifiers || [];
+    
+    const options = modifiers
         .filter(mod => {
             // Check if modifier is absent at this location
             const presentAtAllLocations = mod.presentAtAllLocations !== false;
@@ -84,6 +85,14 @@ app.get('/api/inventory', async (req, res) => {
                 allowsQuantity: allowsQuantity
             };
         });
+
+    modifierGroupMap[obj.id] = {
+        id: obj.id,
+        name: obj.modifierListData.name,
+        modifiers: options,
+        selectionType: obj.modifierListData.selectionType || 'MULTIPLE'
+    };
+}
         .filter(mod => {
             // Filter out modifiers that are explicitly marked as absent at this location
             const modifierData = mod.modifierData;
