@@ -144,10 +144,28 @@ try {
         console.log('🔑 Inventory Map Keys:', Object.keys(inventoryMap));
 console.log('📋 Full Inventory Map:', JSON.stringify(inventoryMap, null, 2));
 
-        const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(item => {
-            const itemData = item.itemData;
-            const variation = itemData.variations[0];
-            const variationData = variation.itemVariationData;
+   const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(item => {
+    const itemData = item.itemData;
+    
+    // Map ALL variations for this item
+    const variations = (itemData.variations || []).map(variation => {
+        const variationData = variation.itemVariationData;
+        const inventory = inventoryMap[variation.id];
+        const isStockManaged = variationData.trackInventory === true;
+        const stockQuantity = inventory ? inventory.quantity : null;
+        
+        return {
+            id: variation.id,
+            name: variationData.name,
+            price: Number(variationData.priceMoney.amount) / 100,
+            sku: variationData.sku || null,
+            stockQuantity: stockQuantity,
+            isStockManaged: isStockManaged
+        };
+    });
+    
+    // Use first variation as default for backward compatibility
+    const defaultVariation = variations[0];
             
             const imageId = itemData.imageIds ? itemData.imageIds[0] : null;
             const imageUrl = imageId ? imageMap[imageId] : "cupcake"; 
