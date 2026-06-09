@@ -56,18 +56,30 @@ app.get('/api/inventory', async (req, res) => {
                 }
                 
                 if (obj.type === 'MODIFIER_LIST' && obj.modifierListData) {
-    const options = (obj.modifierListData.modifiers || []).map(mod => {
-        const modifierData = mod.modifierData;
-        
-        const allowsQuantity = modifierData.quantityEnabled === true;
-        
-        return {
-            id: mod.id,
-            name: modifierData.name,
-            price: modifierData.priceMoney ? Number(modifierData.priceMoney.amount) / 100 : 0,
-            allowsQuantity: allowsQuantity  // 👈 NEW
-        };
-    });
+    const options = (obj.modifierListData.modifiers || [])
+        .filter(mod => {
+            // Filter out modifiers that are explicitly marked as absent at this location
+            const modifierData = mod.modifierData;
+            
+            // Check if modifier is present at the current location
+            const absentAtLocations = mod.absentAtLocationIds || [];
+            const isAbsent = absentAtLocations.includes(process.env.SQUARE_LOCATION_ID);
+            
+            // Only include modifiers that are NOT absent
+            return !isAbsent;
+        })
+        .map(mod => {
+            const modifierData = mod.modifierData;
+            
+            const allowsQuantity = modifierData.quantityEnabled === true;
+            
+            return {
+                id: mod.id,
+                name: modifierData.name,
+                price: modifierData.priceMoney ? Number(modifierData.priceMoney.amount) / 100 : 0,
+                allowsQuantity: allowsQuantity
+            };
+        });
 
     modifierGroupMap[obj.id] = {
         id: obj.id,
