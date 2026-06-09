@@ -1001,32 +1001,32 @@ app.post('/api/process-payment', async (req, res) => {
             }
         }
 
-        // Build line items from cart
+// Build line items from cart
 const lineItems = items.map((item, index) => {
     console.log(`   Building line item ${index + 1}: ${item.name} x${item.quantity}`);
     
-    const pricePerUnit = item.price / item.quantity;
+    // Use variationId if provided, otherwise use catalogObjectId
+    const catalogId = item.variationId || item.catalogObjectId;
+    console.log(`   Using catalog ID: ${catalogId}${item.variationId ? ' (variation)' : ' (item)'}`);
+    
     const lineItem = {
-        name: item.name,
-        quantity: String(item.quantity),
-        basePriceMoney: {
-            amount: BigInt(Math.round(pricePerUnit * 100)),
-            currency: 'USD'
-        }
+        catalogObjectId: catalogId,
+        quantity: String(item.quantity)
     };
 
     // Add modifiers if present
     if (item.modifiers && item.modifiers.length > 0) {
         console.log(`      ↳ Adding ${item.modifiers.length} modifiers`);
         lineItem.modifiers = item.modifiers.map(mod => ({
-            catalogObjectId: mod.id, // Square's catalog ID for the modifier
-            name: mod.name,
-            basePriceMoney: {
-                amount: BigInt(Math.round(mod.price * 100)),
-                currency: 'USD'
-            },
-            quantity: String(mod.quantity || 1) // Support quantity for modifiers
+            catalogObjectId: mod.id,
+            quantity: String(mod.quantity || 1)
         }));
+    }
+
+    // Add variation name to note for kitchen staff
+    if (item.variationName) {
+        console.log(`      ↳ Variation: ${item.variationName}`);
+        lineItem.note = item.variationName;
     }
 
     return lineItem;
