@@ -93,39 +93,6 @@ app.get('/api/inventory', async (req, res) => {
         selectionType: obj.modifierListData.selectionType || 'MULTIPLE'
     };
 }
-        .filter(mod => {
-            // Filter out modifiers that are explicitly marked as absent at this location
-            const modifierData = mod.modifierData;
-            
-            // Check if modifier is present at the current location
-            const absentAtLocations = mod.absentAtLocationIds || [];
-            const isAbsent = absentAtLocations.includes(process.env.SQUARE_LOCATION_ID);
-            
-            // Only include modifiers that are NOT absent
-            return !isAbsent;
-        })
-        .map(mod => {
-            const modifierData = mod.modifierData;
-            
-            const allowsQuantity = modifierData.quantityEnabled === true;
-            
-            return {
-                id: mod.id,
-                name: modifierData.name,
-                price: modifierData.priceMoney ? Number(modifierData.priceMoney.amount) / 100 : 0,
-                allowsQuantity: allowsQuantity
-            };
-        });
-
-    modifierGroupMap[obj.id] = {
-        id: obj.id,
-        name: obj.modifierListData.name,
-        modifiers: options,
-        selectionType: obj.modifierListData.selectionType || 'MULTIPLE'
-    };
-}
-            });
-        }
         let inventoryMap = {};
 try {
     console.log('🔍 Fetching inventory for location:', process.env.SQUARE_LOCATION_ID);
