@@ -1005,28 +1005,26 @@ app.post('/api/process-payment', async (req, res) => {
 const lineItems = items.map((item, index) => {
     console.log(`   Building line item ${index + 1}: ${item.name} x${item.quantity}`);
     
-    // Use variationId if provided, otherwise use catalogObjectId
+    // IMPORTANT: Use variationId as the main catalog object (not as a note!)
+    // Square's variations include the dough type, and Square will display it properly
     const catalogId = item.variationId || item.catalogObjectId;
     console.log(`   Using catalog ID: ${catalogId}${item.variationId ? ' (variation)' : ' (item)'}`);
     
     const lineItem = {
-        catalogObjectId: catalogId,
+        catalogObjectId: catalogId,  // ← This points to the specific variation
         quantity: String(item.quantity)
+        // DO NOT include basePriceMoney - Square pulls price from catalog
+        // DO NOT add variation as a note - Square handles it automatically
     };
 
     // Add modifiers if present
     if (item.modifiers && item.modifiers.length > 0) {
         console.log(`      ↳ Adding ${item.modifiers.length} modifiers`);
         lineItem.modifiers = item.modifiers.map(mod => ({
-            catalogObjectId: mod.id,
+            catalogObjectId: mod.id,  // ← Modifier's catalog ID
             quantity: String(mod.quantity || 1)
+            // DO NOT include basePriceMoney for modifiers either
         }));
-    }
-
-    // Add variation name to note for kitchen staff
-    if (item.variationName) {
-        console.log(`      ↳ Variation: ${item.variationName}`);
-        lineItem.note = item.variationName;
     }
 
     return lineItem;
