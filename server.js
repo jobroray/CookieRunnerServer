@@ -56,7 +56,34 @@ app.get('/api/inventory', async (req, res) => {
                 }
                 
                 if (obj.type === 'MODIFIER_LIST' && obj.modifierListData) {
+    // Filter and map modifiers, excluding those absent at current location
     const options = (obj.modifierListData.modifiers || [])
+        .filter(mod => {
+            // Check if modifier is absent at this location
+            const presentAtAllLocations = mod.presentAtAllLocations !== false;
+            const absentAtLocations = mod.absentAtLocationIds || [];
+            const isAbsentHere = absentAtLocations.includes(process.env.SQUARE_LOCATION_ID);
+            
+            // Log for debugging
+            console.log(`   Modifier: ${mod.modifierData.name}`);
+            console.log(`      presentAtAllLocations: ${presentAtAllLocations}`);
+            console.log(`      absentAtLocationIds: ${JSON.stringify(absentAtLocations)}`);
+            console.log(`      isAbsent: ${isAbsentHere}`);
+            
+            // Include only if present at all locations OR not in the absent list
+            return presentAtAllLocations || !isAbsentHere;
+        })
+        .map(mod => {
+            const modifierData = mod.modifierData;
+            const allowsQuantity = modifierData.quantityEnabled === true;
+            
+            return {
+                id: mod.id,
+                name: modifierData.name,
+                price: modifierData.priceMoney ? Number(modifierData.priceMoney.amount) / 100 : 0,
+                allowsQuantity: allowsQuantity
+            };
+        });
         .filter(mod => {
             // Filter out modifiers that are explicitly marked as absent at this location
             const modifierData = mod.modifierData;
