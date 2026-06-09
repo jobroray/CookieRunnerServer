@@ -28,6 +28,21 @@ const squareClient = new Client({
     },
     environment: process.env.SQUARE_ENVIRONMENT === 'sandbox' ? Environment.Sandbox : Environment.Production,
 });
+// Helper function to check if a pickup slot is available (15-min window with 5-min slots)
+function isSlotAvailable(candidateTime, ordersBySlot, maxOrdersPerSlot = 2) {
+    // Check current slot and 2 slots before (to cover 15-minute window)
+    const slot0 = candidateTime.clone().toISOString();  // Current slot
+    const slot1 = candidateTime.clone().subtract(5, 'minutes').toISOString();  // 5 min ago
+    const slot2 = candidateTime.clone().subtract(10, 'minutes').toISOString(); // 10 min ago
+    
+    const ordersInWindow = 
+        (ordersBySlot[slot0] || 0) + 
+        (ordersBySlot[slot1] || 0) + 
+        (ordersBySlot[slot2] || 0);
+    
+    console.log(`   Checking window: ${ordersInWindow} orders in 15-min window (max: ${maxOrdersPerSlot})`);
+    return ordersInWindow < maxOrdersPerSlot;
+}
 
 // INVENTORY ENDPOINT
 app.get('/api/inventory', async (req, res) => {
@@ -686,16 +701,16 @@ app.get('/api/available-pickup-times', async (req, res) => {
     }
 });
 
-// CALCULATE IMMEDIATE PICKUP TIME (Just get first available slot!)
+// CALCULATE IMMEDIATE PICKUP TIME (Find first available slot respecting 15-min window)
 app.get('/api/calculate-immediate-pickup', async (req, res) => {
     try {
         console.log('⚡ Getting first available pickup slot for ASAP order');
         
-        // Reuse the same logic as available-pickup-times
         const locationTimezone = 'America/Chicago';
         const now = moment().tz(locationTimezone);
         const minPrepTimeMinutes = parseInt(process.env.MIN_PREP_TIME_MINUTES) || 35;
-        const immediateSlotInterval = 5; // 5-minute increments for ASAP
+        const maxOrdersPerSlot = 2;
+        const slotInterval = 5;
         
         // Get location and business hours
         const locationResult = await squareClient.locationsApi.retrieveLocation(
@@ -709,91 +724,100 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
             return res.status(400).json({ error: 'Store is currently closed' });
         }
         
-        // Start from now + prep time
-        let readyTime = now.clone().add(minPrepTimeMinutes, 'minutes');
-        
-        console.log('⏱  Prep time:', minPrepTimeMinutes, 'minutes');
-        console.log('📍 Initial ready time:', readyTime.format('M/D/YYYY, h:mm:ss A'));
-        
-        // Round UP to nearest 5-minute increment (ASAP uses 5-min, not 15-min)
-        const currentMinute = readyTime.minute();
-        const roundedMinute = Math.ceil(currentMinute / immediateSlotInterval) * immediateSlotInterval;
-        readyTime.minute(roundedMinute).second(0).millisecond(0);
-        
-        console.log('🎯 Rounded ready time (5-min):', readyTime.format('M/D/YYYY, h:mm A'));
-        
-        // Check if within business hours
-        const dayOfWeek = readyTime.format('ddd').toUpperCase();
-        const readyMinutes = readyTime.hour() * 60 + readyTime.minute();
-        
-        const dayPeriods = businessHours.filter(period => period.dayOfWeek === dayOfWeek);
-        let isWithinHours = false;
-        
-        for (const period of dayPeriods) {
-            const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
-            const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
-            
-            const startMinutes = startHour * 60 + startMin;
-            const endMinutes = endHour * 60 + endMin;
-            
-            if (readyMinutes >= startMinutes && readyMinutes < endMinutes) {
-                // Make sure there's enough time after opening for prep
-                const minutesSinceOpening = readyMinutes - startMinutes;
-                if (minutesSinceOpening >= minPrepTimeMinutes) {
-                    isWithinHours = true;
-                    break;
+        // Get existing orders
+        const futureDate = moment().add(1, 'days').toDate();
+        const ordersResult = await squareClient.ordersApi.searchOrders({
+            locationIds: [process.env.SQUARE_LOCATION_ID],
+            query: {
+                filter: {
+                    stateFilter: { states: ['OPEN'] },
+                    dateTimeFilter: {
+                        createdAt: {
+                            startAt: moment().toISOString(),
+                            endAt: futureDate.toISOString()
+                        }
+                    }
                 }
-            }
+            },
+            limit: 500
+        });
+        
+        // Count orders by pickup time (count per slot)
+        const ordersBySlot = {};
+        if (ordersResult.result.orders) {
+            ordersResult.result.orders.forEach(order => {
+                if (order.fulfillments?.[0]?.pickupDetails?.pickupAt) {
+                    const pickupTime = order.fulfillments[0].pickupDetails.pickupAt;
+                    ordersBySlot[pickupTime] = (ordersBySlot[pickupTime] || 0) + 1;
+                }
+            });
         }
         
-        if (!isWithinHours) {
-            console.log('⚠️ Ready time falls outside business hours, finding next opening');
+        console.log('📦 Existing orders:', Object.keys(ordersBySlot).length, 'time slots occupied');
+        
+        // Start from now + prep time, rounded to next 5-min increment
+        let candidateTime = now.clone().add(minPrepTimeMinutes, 'minutes');
+        const currentMinute = candidateTime.minute();
+        const roundedMinute = Math.ceil(currentMinute / slotInterval) * slotInterval;
+        candidateTime.minute(roundedMinute).second(0).millisecond(0);
+        
+        console.log('🎯 Starting search from:', candidateTime.format('h:mm A'));
+        
+        // Find first available slot
+        let foundSlot = false;
+        let iterations = 0;
+        const maxIterations = 200;
+        
+        while (!foundSlot && iterations < maxIterations) {
+            iterations++;
             
-            // Find next opening
-            let daysChecked = 0;
-            let nextOpenTime = null;
+            const dayOfWeek = candidateTime.format('ddd').toUpperCase();
+            const candidateMinutes = candidateTime.hour() * 60 + candidateTime.minute();
             
-            while (daysChecked < 7 && !nextOpenTime) {
-                const checkDay = now.clone().add(daysChecked, 'days');
-                const checkDayOfWeek = checkDay.format('ddd').toUpperCase();
-                const periodsForDay = businessHours.filter(p => p.dayOfWeek === checkDayOfWeek);
+            const dayPeriods = businessHours.filter(period => period.dayOfWeek === dayOfWeek);
+            
+            // Check if within business hours
+            let isWithinHours = false;
+            for (const period of dayPeriods) {
+                const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
+                const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
                 
-                if (periodsForDay.length > 0) {
-                    const earliestPeriod = periodsForDay.sort((a, b) => {
-                        return a.startLocalTime.localeCompare(b.startLocalTime);
-                    })[0];
-                    
-                    const [hour, min] = earliestPeriod.startLocalTime.split(':').map(Number);
-                    nextOpenTime = checkDay.clone()
-                        .hour(hour)
-                        .minute(min)
-                        .second(0)
-                        .millisecond(0)
-                        .add(minPrepTimeMinutes, 'minutes');
-                    
-                    // Round to 5-min increment
-                    const nextMinute = nextOpenTime.minute();
-                    const nextRounded = Math.ceil(nextMinute / immediateSlotInterval) * immediateSlotInterval;
-                    nextOpenTime.minute(nextRounded);
+                const startMinutes = startHour * 60 + startMin;
+                const endMinutes = endHour * 60 + endMin;
+                
+                if (candidateMinutes >= startMinutes && candidateMinutes < endMinutes) {
+                    const minutesSinceOpening = candidateMinutes - startMinutes;
+                    if (minutesSinceOpening >= minPrepTimeMinutes) {
+                        isWithinHours = true;
+                        break;
+                    }
                 }
-                
-                daysChecked++;
             }
             
-            if (nextOpenTime) {
-                readyTime = nextOpenTime;
-                console.log('✅ Next available time:', readyTime.format('ddd M/D/YYYY, h:mm A'));
+            if (isWithinHours) {
+                console.log(`🔍 Checking ${candidateTime.format('h:mm A')}...`);
+                
+                // Check if this slot is available (considering 15-min window)
+                if (isSlotAvailable(candidateTime, ordersBySlot, maxOrdersPerSlot)) {
+                    foundSlot = true;
+                    console.log(`✅ Found available slot: ${candidateTime.format('ddd M/D h:mm A')}`);
+                } else {
+                    console.log(`   ❌ Window full, trying next slot...`);
+                    candidateTime.add(slotInterval, 'minutes');
+                }
             } else {
-                return res.status(400).json({ error: 'No available pickup times in the next week' });
+                candidateTime.add(slotInterval, 'minutes');
             }
         }
         
-        console.log(`✅ ASAP pickup time: ${readyTime.format('ddd M/D/YYYY, h:mm A')}`);
+        if (!foundSlot) {
+            return res.status(400).json({ error: 'No available pickup times in next 24 hours' });
+        }
         
         res.json({
-            readyTime: readyTime.toISOString(),
+            readyTime: candidateTime.toISOString(),
             prepTimeMinutes: minPrepTimeMinutes,
-            slotInterval: immediateSlotInterval
+            slotInterval: slotInterval
         });
         
     } catch (error) {
