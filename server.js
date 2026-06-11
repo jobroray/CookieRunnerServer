@@ -560,11 +560,13 @@ app.get('/api/available-pickup-times', async (req, res) => {
         // Get existing orders
         const futureDate = moment().add(maxDaysAhead, 'days').toDate();
         
-        const ordersResult = await squareClient.ordersApi.searchOrders({
+const ordersResult = await squareClient.ordersApi.searchOrders({
     locationIds: [process.env.SQUARE_LOCATION_ID],
     query: {
         filter: {
-            stateFilter: { states: ['OPEN', 'DRAFT'] }, // ✅ Add DRAFT
+            stateFilter: { 
+                states: ['DRAFT', 'OPEN', 'PROPOSED'] // Include all pre-completion states
+            },
             dateTimeFilter: {
                 createdAt: {
                     startAt: moment().toISOString(),
@@ -574,8 +576,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
         }
     },
     limit: 500
-});
-        
+});     
         const ordersBySlot = {};
         if (ordersResult.result.orders) {
             ordersResult.result.orders.forEach(order => {
@@ -828,12 +829,13 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
         
         // Get existing orders
         const futureDate = moment().add(7, 'days').toDate();
-        // In /api/calculate-immediate-pickup
 const ordersResult = await squareClient.ordersApi.searchOrders({
     locationIds: [process.env.SQUARE_LOCATION_ID],
     query: {
         filter: {
-            stateFilter: { states: ['OPEN', 'DRAFT'] }, // ✅ Add DRAFT
+            stateFilter: { 
+                states: ['DRAFT', 'OPEN', 'PROPOSED'] // Include all pre-completion states
+            },
             dateTimeFilter: {
                 createdAt: {
                     startAt: moment().toISOString(),
