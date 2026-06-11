@@ -62,7 +62,7 @@ async function buildSharedTimeline(squareClient, locationId, businessHours, loca
                 stateFilter: { states: ['OPEN'] },
                 dateTimeFilter: {
                     createdAt: {
-                        startAt: moment().subtract(1, 'days').toISOString(),
+                        startAt: moment().subtract(14, 'days').toISOString(),
                         endAt: futureDate.toISOString()
                     }
                 }
