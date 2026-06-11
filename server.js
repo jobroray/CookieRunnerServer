@@ -717,8 +717,8 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
         const locationTimezone = 'America/Chicago';
         const now = moment().tz(locationTimezone);
         const minPrepTimeMinutes = parseInt(process.env.MIN_PREP_TIME_MINUTES) || 35;
-        const maxOrdersPerSlot = 2;
-        const slotInterval = 5;
+        const maxOrdersPerWindow = 2; // Maximum 2 orders per 15-minute window
+        const slotInterval = 5; // 5-minute slots
         
         // Get location and business hours
         const locationResult = await squareClient.locationsApi.retrieveLocation(
@@ -750,18 +750,26 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
             limit: 500
         });
         
-        // Count orders by pickup time (count per slot)
+        // Count orders by pickup time (rounded to 5-min slot)
         const ordersBySlot = {};
         if (ordersResult.result.orders) {
             ordersResult.result.orders.forEach(order => {
                 if (order.fulfillments?.[0]?.pickupDetails?.pickupAt) {
-                    const pickupTime = order.fulfillments[0].pickupDetails.pickupAt;
-                    ordersBySlot[pickupTime] = (ordersBySlot[pickupTime] || 0) + 1;
+                    const pickupTime = moment(order.fulfillments[0].pickupDetails.pickupAt);
+                    
+                    // Round to nearest 5-minute slot for consistent comparison
+                    const roundedMinute = Math.floor(pickupTime.minute() / 5) * 5;
+                    pickupTime.minute(roundedMinute).second(0).millisecond(0);
+                    
+                    const slotKey = pickupTime.toISOString();
+                    ordersBySlot[slotKey] = (ordersBySlot[slotKey] || 0) + 1;
+                    
+                    console.log(`📦 Existing order in slot: ${pickupTime.format('h:mm A')} (${ordersBySlot[slotKey]} orders)`);
                 }
             });
         }
         
-        console.log('📦 Existing orders:', Object.keys(ordersBySlot).length, 'time slots occupied');
+        console.log('📊 Total occupied slots:', Object.keys(ordersBySlot).length);
         
         // Start from now + prep time, rounded to next 5-min increment
         let candidateTime = now.clone().add(minPrepTimeMinutes, 'minutes');
@@ -770,6 +778,26 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
         candidateTime.minute(roundedMinute).second(0).millisecond(0);
         
         console.log('🎯 Starting search from:', candidateTime.format('h:mm A'));
+        
+        // Helper function to check if a slot is available
+        function canBookSlot(time) {
+            // Check current slot and 2 slots before (15-minute window)
+            const slot0 = time.clone();
+            const slot1 = time.clone().subtract(5, 'minutes');
+            const slot2 = time.clone().subtract(10, 'minutes');
+            
+            const count0 = ordersBySlot[slot0.toISOString()] || 0;
+            const count1 = ordersBySlot[slot1.toISOString()] || 0;
+            const count2 = ordersBySlot[slot2.toISOString()] || 0;
+            
+            const totalOrders = count0 + count1 + count2;
+            
+            console.log(`   🔍 Checking ${time.format('h:mm A')}:`);
+            console.log(`      Current slot: ${count0} | -5min: ${count1} | -10min: ${count2}`);
+            console.log(`      Total in 15min window: ${totalOrders}/${maxOrdersPerWindow}`);
+            
+            return totalOrders < maxOrdersPerWindow;
+        }
         
         // Find first available slot
         let foundSlot = false;
@@ -802,29 +830,24 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
                 }
             }
             
-            if (isWithinHours) {
-                console.log(`🔍 Checking ${candidateTime.format('h:mm A')}...`);
-                
-                // Check if this slot is available (considering 15-min window)
-                if (isSlotAvailable(candidateTime, ordersBySlot, maxOrdersPerSlot)) {
-                    foundSlot = true;
-                    console.log(`✅ Found available slot: ${candidateTime.format('ddd M/D h:mm A')}`);
-                } else {
-                    console.log(`   ❌ Window full, trying next slot...`);
-                    candidateTime.add(slotInterval, 'minutes');
-                }
+            if (isWithinHours && canBookSlot(candidateTime)) {
+                foundSlot = true;
+                console.log(`✅ Found available slot: ${candidateTime.format('ddd M/D h:mm A')}`);
             } else {
+                if (!isWithinHours) {
+                    console.log(`   ⏭️  ${candidateTime.format('h:mm A')} - Outside business hours`);
+                } else {
+                    console.log(`   ❌ ${candidateTime.format('h:mm A')} - Window full`);
+                }
                 candidateTime.add(slotInterval, 'minutes');
             }
         }
         
         if (!foundSlot) {
             console.log(`❌ No slot found after ${iterations} iterations`);
-            console.log(`   Last checked time: ${candidateTime.format('ddd M/D h:mm A')}`);
-            
             return res.status(400).json({ 
                 error: 'No available pickup times in the next 7 days',
-                details: 'Store may be closed or fully booked. Please contact us.'
+                details: 'All slots are fully booked. Please contact us.'
             });
         }
         
