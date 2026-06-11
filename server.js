@@ -740,6 +740,37 @@ app.get('/api/debug-orders', async (req, res) => {
     }
 });
 
+app.get('/api/debug-raw-orders', async (req, res) => {
+    try {
+        const futureDate = moment().add(7, 'days').toDate();
+        
+        const allOrdersResult = await squareClient.ordersApi.searchOrders({
+            locationIds: [process.env.SQUARE_LOCATION_ID],
+            query: {
+                filter: {
+                    dateTimeFilter: {
+                        createdAt: {
+                            startAt: moment().subtract(1, 'day').toISOString(),
+                            endAt: futureDate.toISOString()
+                        }
+                    }
+                }
+            },
+            limit: 100
+        });
+        
+        // Return completely raw Square response
+        res.json({
+            totalOrders: allOrdersResult.result.orders?.length || 0,
+            rawOrders: allOrdersResult.result.orders || []
+        });
+        
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // CALCULATE IMMEDIATE PICKUP TIME (Find first available slot respecting 15-min window)
 app.get('/api/calculate-immediate-pickup', async (req, res) => {
     try {
