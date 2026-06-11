@@ -699,7 +699,6 @@ app.get('/api/debug-timeline', async (req, res) => {
         const locationResult = await squareClient.locationsApi.retrieveLocation(process.env.SQUARE_LOCATION_ID);
         const businessHours = locationResult.result.location.businessHours?.periods || [];
         
-        // 1. Get the compiled timeline slots (What the app thinks is booked)
         const ordersBySlot = await buildSharedTimeline(
             squareClient, 
             process.env.SQUARE_LOCATION_ID, 
@@ -709,16 +708,15 @@ app.get('/api/debug-timeline', async (req, res) => {
             maxOrdersPerWindow
         );
         
-        // 2. Fetch the raw orders directly (What Square is actually sending us)
         const futureDate = moment().add(7, 'days').toDate();
         const ordersResult = await squareClient.ordersApi.searchOrders({
             locationIds: [process.env.SQUARE_LOCATION_ID],
             query: {
                 filter: {
-                    stateFilter: { states: ['OPEN'] },
+                    // 🚨 REMOVED stateFilter completely so we can see DRAFT, COMPLETED, and CANCELED orders
                     dateTimeFilter: {
                         createdAt: {
-                            startAt: moment().subtract(1, 'days').toISOString(),
+                            startAt: moment().subtract(7, 'days').toISOString(), // 🚨 Expanded to 7 days
                             endAt: futureDate.toISOString()
                         }
                     }
@@ -727,10 +725,9 @@ app.get('/api/debug-timeline', async (req, res) => {
             limit: 100
         });
 
-        // Map it into something clean and easy to read
         const cleanOrders = (ordersResult.result.orders || []).map(o => ({
             orderId: o.id.substring(0, 8) + '...',
-            state: o.state,
+            state: o.state, // 👈 This will tell us if they are DRAFTs
             createdAt: moment(o.createdAt).tz(locationTimezone).format('ddd M/D h:mm A'),
             scheduleType: o.fulfillments?.[0]?.pickupDetails?.scheduleType || 'UNKNOWN',
             rawPickupAt: o.fulfillments?.[0]?.pickupDetails?.pickupAt || 'NONE',
@@ -742,7 +739,7 @@ app.get('/api/debug-timeline', async (req, res) => {
         res.json({
             status: "SUCCESS",
             timelineBlocks: ordersBySlot,
-            totalOpenOrdersFound: cleanOrders.length,
+            totalOrdersFound: cleanOrders.length,
             orderData: cleanOrders
         });
         
@@ -896,8 +893,12 @@ app.get('/api/calculate-immediate-pickup', async (req, res) => {
                 const endMinutes = endHour * 60 + endMin;
                 
                 if (candidateMinutes >= startMinutes && candidateMinutes < endMinutes) {
-                    isWithinHours = true;
-                    break;
+                    // THE FIX: Ensure we are at least 35 minutes past opening time
+                    const minutesSinceOpening = candidateMinutes - startMinutes;
+                    if (minutesSinceOpening >= minPrepTimeMinutes) {
+                        isWithinHours = true;
+                        break;
+                    }
                 }
             }
             
