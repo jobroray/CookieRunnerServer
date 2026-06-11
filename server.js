@@ -72,6 +72,7 @@ async function buildSharedTimeline(squareClient, locationId, businessHours, loca
     });
 
     const ordersBySlot = {};
+	ordersBySlot._auditLog = [];
     if (!ordersResult.result.orders) return ordersBySlot;
 
     ordersResult.result.orders.forEach(order => {
@@ -82,6 +83,7 @@ async function buildSharedTimeline(squareClient, locationId, businessHours, loca
             time.minute(roundedMinute).second(0).millisecond(0);
             const slotKey = time.utc().toISOString();
             ordersBySlot[slotKey] = (ordersBySlot[slotKey] || 0) + 1;
+	ordersBySlot._auditLog.push(`[SCHEDULED] Order ${order.id.substring(0,6)} -> Slot: ${time.format('ddd h:mm A')}`);
         }
     });
 
@@ -128,6 +130,7 @@ async function buildSharedTimeline(squareClient, locationId, businessHours, loca
 
         const slotKey = candidateTime.utc().toISOString();
         ordersBySlot[slotKey] = (ordersBySlot[slotKey] || 0) + 1;
+	ordersBySlot._auditLog.push(`[ASAP] Order ${order.id.substring(0,6)} (Placed: ${orderCreatedAt.format('ddd h:mm A')}) -> Slot: ${candidateTime.format('ddd h:mm A')}`);
     });
 
     return ordersBySlot;
@@ -707,6 +710,8 @@ app.get('/api/debug-timeline', async (req, res) => {
             minPrepTimeMinutes, 
             maxOrdersPerWindow
         );
+	const auditLog = ordersBySlot._auditLog || [];
+        delete ordersBySlot._auditLog;
         
         const futureDate = moment().add(7, 'days').toDate();
         const ordersResult = await squareClient.ordersApi.searchOrders({
