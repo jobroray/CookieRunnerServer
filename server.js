@@ -81,7 +81,7 @@ async function buildSharedTimeline(squareClient, locationId, businessHours, loca
             const time = moment(pickupDetails.pickupAt).tz(locationTimezone);
             const roundedMinute = Math.floor(time.minute() / 5) * 5;
             time.minute(roundedMinute).second(0).millisecond(0);
-            const slotKey = time.utc().toISOString();
+            const slotKey = time.clone().utc().toISOString();
             ordersBySlot[slotKey] = (ordersBySlot[slotKey] || 0) + 1;
 	ordersBySlot._auditLog.push(`[SCHEDULED] Order ${order.id.substring(0,6)} -> Slot: ${time.format('ddd M/D h:mm A')}`);
         }
@@ -128,7 +128,7 @@ async function buildSharedTimeline(squareClient, locationId, businessHours, loca
             candidateTime.add(5, 'minutes');
         }
 
-        const slotKey = candidateTime.utc().toISOString();
+        const slotKey = candidateTime.clone().utc().toISOString();
         ordersBySlot[slotKey] = (ordersBySlot[slotKey] || 0) + 1;
 	ordersBySlot._auditLog.push(`[ASAP] Order ${order.id.substring(0,6)} (Placed: ${orderCreatedAt.format('ddd M/D h:mm A')}) -> Slot: ${candidateTime.format('ddd M/D h:mm A')}`);
     });
