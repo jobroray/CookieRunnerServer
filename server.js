@@ -11,6 +11,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+app.get('/', (req, res) => {
+    res.send('Cookie Runner Backend is live and running!');
+});
+
 const token = process.env.SQUARE_ACCESS_TOKEN;
 console.log("=== SQUARE TOKEN DIAGNOSTICS ===");
 console.log("1. Token actually exists inside Render?", !!token);
