@@ -653,13 +653,18 @@ app.get('/api/available-pickup-times', async (req, res) => {
                     const endMinutes = endHour * 60 + endMin;
                     
                     if (currentMinutes >= startMinutes && currentMinutes < endMinutes) {
-                        const remainder = currentSlot.minute() % slotIntervalMinutes;
+                        // THE FIX: Ensure we are at least 35 minutes past opening time
+                        const minutesSinceOpening = currentMinutes - startMinutes;
                         
-                        if (remainder === 0 && canBookSlot(currentSlot, ordersBySlot, maxOrdersPerWindow)) {
-                            availableSlots.push({ time: currentSlot.toISOString() });
+                        if (minutesSinceOpening >= minPrepTimeMinutes) {
+                            const remainder = currentSlot.minute() % slotIntervalMinutes;
+                            
+                            if (remainder === 0 && canBookSlot(currentSlot, ordersBySlot, maxOrdersPerWindow)) {
+                                availableSlots.push({ time: currentSlot.toISOString() });
+                            }
+                            foundValidSlot = true;
+                            break;
                         }
-                        foundValidSlot = true;
-                        break;
                     }
                 }
                 
@@ -682,6 +687,68 @@ app.get('/api/available-pickup-times', async (req, res) => {
     } catch (error) {
         console.error('❌ Error:', error);
         res.status(500).json({ error: 'Failed to generate pickup times', details: error.message });
+    }
+});
+
+app.get('/api/debug-timeline', async (req, res) => {
+    try {
+        const locationTimezone = 'America/Chicago';
+        const minPrepTimeMinutes = 35;
+        const maxOrdersPerWindow = 2;
+        
+        const locationResult = await squareClient.locationsApi.retrieveLocation(process.env.SQUARE_LOCATION_ID);
+        const businessHours = locationResult.result.location.businessHours?.periods || [];
+        
+        // 1. Get the compiled timeline slots (What the app thinks is booked)
+        const ordersBySlot = await buildSharedTimeline(
+            squareClient, 
+            process.env.SQUARE_LOCATION_ID, 
+            businessHours, 
+            locationTimezone, 
+            minPrepTimeMinutes, 
+            maxOrdersPerWindow
+        );
+        
+        // 2. Fetch the raw orders directly (What Square is actually sending us)
+        const futureDate = moment().add(7, 'days').toDate();
+        const ordersResult = await squareClient.ordersApi.searchOrders({
+            locationIds: [process.env.SQUARE_LOCATION_ID],
+            query: {
+                filter: {
+                    stateFilter: { states: ['OPEN'] },
+                    dateTimeFilter: {
+                        createdAt: {
+                            startAt: moment().subtract(1, 'days').toISOString(),
+                            endAt: futureDate.toISOString()
+                        }
+                    }
+                }
+            },
+            limit: 100
+        });
+
+        // Map it into something clean and easy to read
+        const cleanOrders = (ordersResult.result.orders || []).map(o => ({
+            orderId: o.id.substring(0, 8) + '...',
+            state: o.state,
+            createdAt: moment(o.createdAt).tz(locationTimezone).format('ddd M/D h:mm A'),
+            scheduleType: o.fulfillments?.[0]?.pickupDetails?.scheduleType || 'UNKNOWN',
+            rawPickupAt: o.fulfillments?.[0]?.pickupDetails?.pickupAt || 'NONE',
+            formattedPickup: o.fulfillments?.[0]?.pickupDetails?.pickupAt 
+                ? moment(o.fulfillments[0].pickupDetails.pickupAt).tz(locationTimezone).format('ddd M/D h:mm A') 
+                : 'N/A'
+        }));
+
+        res.json({
+            status: "SUCCESS",
+            timelineBlocks: ordersBySlot,
+            totalOpenOrdersFound: cleanOrders.length,
+            orderData: cleanOrders
+        });
+        
+    } catch (error) {
+        console.error('❌ Debug Error:', error);
+        res.status(500).json({ error: error.message });
     }
 });
 
