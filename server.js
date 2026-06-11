@@ -522,8 +522,8 @@ app.get('/api/available-pickup-times', async (req, res) => {
         const locationTimezone = 'America/Chicago';
         const now = moment().tz(locationTimezone);
         const maxDaysAhead = 14;
-        const maxOrdersPerSlot = 2;
-        const slotIntervalMinutes = 15;
+        const maxOrdersPerWindow = 2;
+        const slotIntervalMinutes = 5;
         const minPrepTimeMinutes = 35;
         
         console.log('⏰ Current time (Local):', now.format('M/D/YYYY, h:mm:ss A'));
@@ -544,59 +544,79 @@ app.get('/api/available-pickup-times', async (req, res) => {
             return res.json({ pickupTimes: [], metadata: { error: 'No business hours' } });
         }
         
-        // Log all periods grouped by day
-        console.log('📋 Business Hours by Day:');
-        const groupedByDay = {};
-        businessHours.forEach(period => {
-            if (!groupedByDay[period.dayOfWeek]) {
-                groupedByDay[period.dayOfWeek] = [];
-            }
-            groupedByDay[period.dayOfWeek].push(`${period.startLocalTime}-${period.endLocalTime}`);
-        });
-        Object.keys(groupedByDay).forEach(day => {
-            console.log(`   ${day}: ${groupedByDay[day].join(', ')}`);
-        });
-        
         // Get existing orders
         const futureDate = moment().add(maxDaysAhead, 'days').toDate();
         
         const ordersResult = await squareClient.ordersApi.searchOrders({
-    locationIds: [process.env.SQUARE_LOCATION_ID],
-    query: {
-        filter: {
-            stateFilter: { states: ['OPEN', 'DRAFT'] }, // ✅ Add DRAFT
-            dateTimeFilter: {
-                createdAt: {
-                    startAt: moment().toISOString(),
-                    endAt: futureDate.toISOString()
+            locationIds: [process.env.SQUARE_LOCATION_ID],
+            query: {
+                filter: {
+                    stateFilter: { states: ['OPEN', 'DRAFT'] },
+                    dateTimeFilter: {
+                        createdAt: {
+                            startAt: moment().toISOString(),
+                            endAt: futureDate.toISOString()
+                        }
+                    }
                 }
-            }
-        }
-    },
-    limit: 500
-});
+            },
+            limit: 500
+        });
         
+        // Count orders by pickup time - CONVERT TO CENTRAL TIME FIRST
         const ordersBySlot = {};
         if (ordersResult.result.orders) {
             ordersResult.result.orders.forEach(order => {
                 if (order.fulfillments?.[0]?.pickupDetails?.pickupAt) {
-                    const pickupTime = order.fulfillments[0].pickupDetails.pickupAt;
-                    ordersBySlot[pickupTime] = (ordersBySlot[pickupTime] || 0) + 1;
+                    const pickupAt = order.fulfillments[0].pickupDetails.pickupAt;
+                    
+                    // ✅ Convert to Central Time FIRST
+                    const pickupTime = moment(pickupAt).tz(locationTimezone);
+                    
+                    // Round to nearest 5-minute slot
+                    const roundedMinute = Math.floor(pickupTime.minute() / 5) * 5;
+                    pickupTime.minute(roundedMinute).second(0).millisecond(0);
+                    
+                    const slotKey = pickupTime.toISOString();
+                    ordersBySlot[slotKey] = (ordersBySlot[slotKey] || 0) + 1;
+                    
+                    console.log(`📦 Order slot: ${pickupTime.format('M/D h:mm A')} (count: ${ordersBySlot[slotKey]})`);
                 }
             });
         }
         
-        console.log('📦 Existing orders in slots:', Object.keys(ordersBySlot).length);
+        console.log('📊 Existing orders in slots:', Object.keys(ordersBySlot).length);
+        
+        // Helper function to check if a slot is available (15-minute window)
+        function canBookSlot(time) {
+            // Check current slot and 2 slots before (15-minute window)
+            const slot0 = time.clone();
+            const slot1 = time.clone().subtract(5, 'minutes');
+            const slot2 = time.clone().subtract(10, 'minutes');
+            
+            const count0 = ordersBySlot[slot0.toISOString()] || 0;
+            const count1 = ordersBySlot[slot1.toISOString()] || 0;
+            const count2 = ordersBySlot[slot2.toISOString()] || 0;
+            
+            const totalOrders = count0 + count1 + count2;
+            
+            return totalOrders < maxOrdersPerWindow;
+        }
         
         // Start from now + prep time
         let currentSlot = now.clone().add(minPrepTimeMinutes, 'minutes');
+        
+        // Round to next 5-minute increment
+        const currentMinute = currentSlot.minute();
+        const roundedMinute = Math.ceil(currentMinute / slotIntervalMinutes) * slotIntervalMinutes;
+        currentSlot.minute(roundedMinute).second(0).millisecond(0);
         
         console.log('🎯 Earliest with prep:', currentSlot.format('M/D/YYYY, h:mm A'));
         
         const availableSlots = [];
         const endDate = now.clone().add(maxDaysAhead, 'days');
         let iterations = 0;
-        const maxIterations = 2000;
+        const maxIterations = 5000;
         
         while (currentSlot.isBefore(endDate) && availableSlots.length < 200 && iterations < maxIterations) {
             iterations++;
@@ -606,7 +626,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
             const minute = currentSlot.minute();
             const currentMinutes = hour * 60 + minute;
             
-            // ✅ FIX: Get ALL periods for this day
+            // Get ALL periods for this day
             const dayPeriods = businessHours.filter(period => period.dayOfWeek === dayOfWeek);
             
             if (dayPeriods.length > 0) {
@@ -626,9 +646,9 @@ app.get('/api/available-pickup-times', async (req, res) => {
                         currentSlot.hour(startHour).minute(startMin).second(0).millisecond(0);
                         currentSlot.add(minPrepTimeMinutes, 'minutes');
                         
-                        // Round to next 15-minute interval
-                        const remainder = 15 - (currentSlot.minute() % 15);
-                        if (remainder !== 15) {
+                        // Round to next 5-minute interval
+                        const remainder = slotIntervalMinutes - (currentSlot.minute() % slotIntervalMinutes);
+                        if (remainder !== slotIntervalMinutes) {
                             currentSlot.add(remainder, 'minutes');
                         }
                         jumpedToNextPeriod = true;
@@ -641,22 +661,20 @@ app.get('/api/available-pickup-times', async (req, res) => {
                         
                         // Check if enough prep time has passed
                         if (minutesSinceOpening >= minPrepTimeMinutes) {
-                            // Round to 15-minute interval
-                            const remainder = currentSlot.minute() % 15;
+                            // Round to 5-minute interval
+                            const remainder = currentSlot.minute() % slotIntervalMinutes;
                             if (remainder !== 0) {
-                                currentSlot.add(15 - remainder, 'minutes');
+                                currentSlot.add(slotIntervalMinutes - remainder, 'minutes');
                                 jumpedToNextPeriod = true;
                                 break;
                             }
                             
-                            const slotKey = currentSlot.toISOString();
-                            const ordersInSlot = ordersBySlot[slotKey] || 0;
-                            
-                            if (ordersInSlot < maxOrdersPerSlot) {
+                            // ✅ Check 15-minute window availability
+                            if (canBookSlot(currentSlot)) {
                                 availableSlots.push({
-                                    time: slotKey,
-                                    ordersInSlot: ordersInSlot,
-                                    spotsLeft: maxOrdersPerSlot - ordersInSlot
+                                    time: currentSlot.toISOString(),
+                                    ordersInWindow: (ordersBySlot[currentSlot.toISOString()] || 0),
+                                    spotsLeft: maxOrdersPerWindow - ((ordersBySlot[currentSlot.toISOString()] || 0))
                                 });
                             }
                             
@@ -682,7 +700,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
             }
         }
         
-        console.log(`✅ Generated ${availableSlots.length} slots (${iterations} iterations)`);
+        console.log(`✅ Generated ${availableSlots.length} available slots (${iterations} iterations)`);
         if (availableSlots.length > 0) {
             const first = moment(availableSlots[0].time).tz(locationTimezone);
             const last = moment(availableSlots[availableSlots.length - 1].time).tz(locationTimezone);
@@ -694,7 +712,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
             pickupTimes: availableSlots.map(slot => slot.time),
             metadata: {
                 totalSlots: availableSlots.length,
-                maxOrdersPerSlot: maxOrdersPerSlot,
+                maxOrdersPerWindow: maxOrdersPerWindow,
                 intervalMinutes: slotIntervalMinutes,
                 prepTimeMinutes: minPrepTimeMinutes
             }
