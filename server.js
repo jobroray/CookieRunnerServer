@@ -744,6 +744,7 @@ app.get('/api/debug-timeline', async (req, res) => {
         res.json({
             status: "SUCCESS",
             timelineBlocks: ordersBySlot,
+	auditLog: auditLog,
             totalOrdersFound: cleanOrders.length,
             orderData: cleanOrders
         });
