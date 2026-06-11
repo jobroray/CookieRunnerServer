@@ -190,7 +190,7 @@ const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(ite
         return {
             id: variation.id,
             name: variationData.name,
-            price: Number(variationData.priceMoney.amount) / 100,
+            price: variationData.priceMoney ? Number(variationData.priceMoney.amount) / 100 : 0,
             sku: variationData.sku || null,
             stockQuantity: stockQuantity,
             isStockManaged: isStockManaged
@@ -198,7 +198,7 @@ const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(ite
     });
     
     // Use first variation as default for backward compatibility
-    const defaultVariation = variations[0];
+    const defaultVariation = variations[0] || { price: 0, stockQuantity: null, isStockManaged: false };
     
     const imageId = itemData.imageIds ? itemData.imageIds[0] : null;
     const imageUrl = imageId ? imageMap[imageId] : null; 
