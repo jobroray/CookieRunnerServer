@@ -484,7 +484,7 @@ app.get('/api/orders/active', async (req, res) => {
                         customerIds: [customerId]
                     },
                     stateFilter: {
-                        states: ['OPEN', 'DRAFT', 'COMPLETED]
+                        states: ['OPEN', 'DRAFT', 'COMPLETED']
                     },
                     dateTimeFilter: {
                         createdAt: {
