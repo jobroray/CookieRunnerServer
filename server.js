@@ -6,7 +6,7 @@ const express = require('express');
 const cors = require('cors');
 
 const { Client, Environment } = require('square/legacy');
-const moment = require('moment-timezone');
+const moment = require('moment-timezone'); // ← ADD THIS LINE
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -32,6 +32,21 @@ const squareClient = new Client({
     },
     environment: process.env.SQUARE_ENVIRONMENT === 'sandbox' ? Environment.Sandbox : Environment.Production,
 });
+// Helper function to check if a pickup slot is available (15-min window with 5-min slots)
+function isSlotAvailable(candidateTime, ordersBySlot, maxOrdersPerSlot = 2) {
+    // Check current slot and 2 slots before (to cover 15-minute window)
+    const slot0 = candidateTime.clone().toISOString();  // Current slot
+    const slot1 = candidateTime.clone().subtract(5, 'minutes').toISOString();  // 5 min ago
+    const slot2 = candidateTime.clone().subtract(10, 'minutes').toISOString(); // 10 min ago
+    
+    const ordersInWindow = 
+        (ordersBySlot[slot0] || 0) + 
+        (ordersBySlot[slot1] || 0) + 
+        (ordersBySlot[slot2] || 0);
+    
+    console.log(`   Checking window: ${ordersInWindow} orders in 15-min window (max: ${maxOrdersPerSlot})`);
+    return ordersInWindow < maxOrdersPerSlot;
+}
 
 // INVENTORY ENDPOINT
 app.get('/api/inventory', async (req, res) => {
@@ -60,127 +75,183 @@ app.get('/api/inventory', async (req, res) => {
                 }
                 
                 if (obj.type === 'MODIFIER_LIST' && obj.modifierListData) {
-                    const options = (obj.modifierListData.modifiers || [])
-                        .filter(mod => {
-                            const absentAtLocations = mod.absentAtLocationIds || [];
-                            const isAbsent = absentAtLocations.includes(process.env.SQUARE_LOCATION_ID);
-                            return !isAbsent;
-                        })
-                        .map(mod => {
-                            const modifierData = mod.modifierData;
-                            const allowsQuantity = modifierData.quantityEnabled === true;
-                            
-                            return {
-                                id: mod.id,
-                                name: modifierData.name,
-                                price: modifierData.priceMoney ? Number(modifierData.priceMoney.amount) / 100 : 0,
-                                allowsQuantity: allowsQuantity
-                            };
-                        });
+    const options = (obj.modifierListData.modifiers || [])
+        .filter(mod => {
+            // Filter out modifiers that are explicitly marked as absent at this location
+            const modifierData = mod.modifierData;
+            
+            // Check if modifier is present at the current location
+            const absentAtLocations = mod.absentAtLocationIds || [];
+            const isAbsent = absentAtLocations.includes(process.env.SQUARE_LOCATION_ID);
+            
+            // Only include modifiers that are NOT absent
+            return !isAbsent;
+        })
+        .map(mod => {
+            const modifierData = mod.modifierData;
+            
+            const allowsQuantity = modifierData.quantityEnabled === true;
+            
+            return {
+                id: mod.id,
+                name: modifierData.name,
+                price: modifierData.priceMoney ? Number(modifierData.priceMoney.amount) / 100 : 0,
+                allowsQuantity: allowsQuantity
+            };
+        });
 
-                    modifierGroupMap[obj.id] = {
-                        id: obj.id,
-                        name: obj.modifierListData.name,
-                        modifiers: options,
-                        selectionType: obj.modifierListData.selectionType || 'MULTIPLE'
-                    };
-                }
+    modifierGroupMap[obj.id] = {
+        id: obj.id,
+        name: obj.modifierListData.name,
+        modifiers: options,
+        selectionType: obj.modifierListData.selectionType || 'MULTIPLE'
+    };
+}
             });
         }
-
         let inventoryMap = {};
-        try {
-            const inventoryResult = await squareClient.inventoryApi.batchRetrieveInventoryCounts({
-                locationIds: [process.env.SQUARE_LOCATION_ID]
-            });
+try {
+    console.log('🔍 Fetching inventory for location:', process.env.SQUARE_LOCATION_ID);
+    
+    const inventoryResult = await squareClient.inventoryApi.batchRetrieveInventoryCounts({
+        locationIds: [process.env.SQUARE_LOCATION_ID]
+    });
+    
+    console.log('📦 Raw inventory response:', JSON.stringify(inventoryResult.result, null, 2));
+    
+    if (inventoryResult.result.counts) {
+        console.log(`📦 Total inventory count records: ${inventoryResult.result.counts.length}`);
+        
+        inventoryResult.result.counts.forEach(count => {
+            console.log(`\n🏷️  Catalog Object ID: ${count.catalogObjectId}`);
+            console.log(`   Quantity: ${count.quantity}`);
+            console.log(`   State: ${count.state}`);
+            console.log(`   Location: ${count.locationId}`);
             
-            if (inventoryResult.result.counts) {
-                inventoryResult.result.counts.forEach(count => {
-                    if (!inventoryMap[count.catalogObjectId]) {
-                        inventoryMap[count.catalogObjectId] = {
-                            quantity: Number(count.quantity) || 0,
-                            state: count.state
-                        };
-                    } else {
-                        const newQty = Number(count.quantity) || 0;
-                        if (newQty > inventoryMap[count.catalogObjectId].quantity) {
-                            inventoryMap[count.catalogObjectId] = {
-                                quantity: newQty,
-                                state: count.state
-                            };
-                        }
-                    }
+            // Store inventory by catalog object ID
+            // If multiple records exist for same ID, keep the one with highest quantity
+            if (!inventoryMap[count.catalogObjectId]) {
+                inventoryMap[count.catalogObjectId] = {
+                    quantity: Number(count.quantity) || 0,
+                    state: count.state
+                };
+            } else {
+                // If we already have this ID, take the higher quantity
+                const newQty = Number(count.quantity) || 0;
+                if (newQty > inventoryMap[count.catalogObjectId].quantity) {
+                    inventoryMap[count.catalogObjectId] = {
+                        quantity: newQty,
+                        state: count.state
+                    };
+                }
+            }
+        });
+        
+        console.log('\n📊 Final Inventory Map:');
+        Object.keys(inventoryMap).forEach(id => {
+            console.log(`   ${id}: ${inventoryMap[id].quantity} (${inventoryMap[id].state})`);
+        });
+    } else {
+        console.log('⚠️  No inventory counts returned from Square');
+    }
+    
+    console.log(`\n✅ Processed inventory for ${Object.keys(inventoryMap).length} items`);
+} catch (invError) {
+    console.warn('⚠️ Could not fetch inventory counts:', invError.message);
+    console.error(invError);
+}
+        console.log('🔑 Inventory Map Keys:', Object.keys(inventoryMap));
+console.log('📋 Full Inventory Map:', JSON.stringify(inventoryMap, null, 2));
+
+const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(item => {
+    const itemData = item.itemData;
+    
+    // Map ALL variations for this item
+    const variations = (itemData.variations || []).map(variation => {
+        const variationData = variation.itemVariationData;
+        
+        // Get inventory for this specific variation
+        let inventory = inventoryMap[variation.id];
+        if (!inventory) {
+            inventory = inventoryMap[item.id];
+        }
+        
+        const trackInventoryFlag = variationData.trackInventory === true;
+        const hasInventoryData = !!inventory;
+        const isStockManaged = hasInventoryData || trackInventoryFlag;
+        
+        let stockQuantity = null;
+        if (inventory) {
+            stockQuantity = inventory.quantity;
+        } else if (isStockManaged) {
+            stockQuantity = 0;
+        }
+        
+        return {
+            id: variation.id,
+            name: variationData.name,
+            price: variationData.priceMoney ? Number(variationData.priceMoney.amount) / 100 : 0,
+            sku: variationData.sku || null,
+            stockQuantity: stockQuantity,
+            isStockManaged: isStockManaged
+        };
+    });
+    
+    // Use first variation as default for backward compatibility
+    const defaultVariation = variations[0] || { price: 0, stockQuantity: null, isStockManaged: false };
+    
+    const imageId = itemData.imageIds ? itemData.imageIds[0] : null;
+    const imageUrl = imageId ? imageMap[imageId] : null; 
+
+console.log(`📸 Item: ${itemData.name}`);
+console.log(`   Image ID: ${imageId}`);
+console.log(`   Image URL: ${imageUrl}`);
+    
+    const linkedGroups = (itemData.modifierListInfo || [])
+        .map(info => {
+            const baseGroup = modifierGroupMap[info.modifierListId];
+            if (!baseGroup) return null;
+            
+            return {
+                id: baseGroup.id,
+                name: baseGroup.name,
+                modifiers: baseGroup.modifiers,
+                selectionType: (info.selectionType || baseGroup.selectionType) === 'SINGLE' ? 'single' : 'multiple',
+                minSelections: info.minSelectedModifiers !== undefined ? info.minSelectedModifiers : null,
+                maxSelections: info.maxSelectedModifiers !== undefined ? info.maxSelectedModifiers : null
+            };
+        })
+        .filter(Boolean);
+
+    const isFeaturedCookie = (itemData.categories || []).some(cat => categoryMap[cat.id] === "Featured") || 
+                             (categoryMap[itemData.categoryId] === "Featured");
+
+    return {
+        id: item.id,
+        name: itemData.name,
+        category: (itemData.categoryId || itemData.categories?.[0]?.id) ? (categoryMap[itemData.categoryId || itemData.categories?.[0]?.id] || "Other Cookies") : "Other Cookies",
+        subtitle: itemData.description || "Freshly baked",
+        price: defaultVariation.price,  // ✅ Use default variation price
+        imagePath: imageUrl,
+        description: itemData.description || "",
+        modifierGroups: linkedGroups.length > 0 ? linkedGroups : null,
+        isFeatured: isFeaturedCookie,
+        stockQuantity: defaultVariation.stockQuantity,  // ✅ Use default variation stock
+        isStockManaged: defaultVariation.isStockManaged,  // ✅ Use default variation stock tracking
+        variations: variations  // ✅ NEW: All size/type options
+    };
+});
+        
+        console.log(`✅ Fetched ${formattedItems.length} items from Square`);
+        formattedItems.forEach(item => {
+            if (item.isStockManaged) {
+                console.log(`  📊 ${item.name}: ${item.stockQuantity !== null ? item.stockQuantity + ' in stock' : 'No stock data'}`);
+            }
+            if (item.modifierGroups) {
+                item.modifierGroups.forEach(group => {
+                    console.log(`     - ${group.name}: ${group.selectionType} (min: ${group.minSelections}, max: ${group.maxSelections})`);
                 });
             }
-        } catch (invError) {
-            console.warn('⚠️ Could not fetch inventory counts:', invError.message);
-        }
-
-        const formattedItems = result.objects.filter(obj => obj.type === 'ITEM').map(item => {
-            const itemData = item.itemData;
-            
-            const variations = (itemData.variations || []).map(variation => {
-                const variationData = variation.itemVariationData;
-                let inventory = inventoryMap[variation.id] || inventoryMap[item.id];
-                
-                const trackInventoryFlag = variationData.trackInventory === true;
-                const hasInventoryData = !!inventory;
-                const isStockManaged = hasInventoryData || trackInventoryFlag;
-                
-                let stockQuantity = null;
-                if (inventory) {
-                    stockQuantity = inventory.quantity;
-                } else if (isStockManaged) {
-                    stockQuantity = 0;
-                }
-                
-                return {
-                    id: variation.id,
-                    name: variationData.name,
-                    price: variationData.priceMoney ? Number(variationData.priceMoney.amount) / 100 : 0,
-                    sku: variationData.sku || null,
-                    stockQuantity: stockQuantity,
-                    isStockManaged: isStockManaged
-                };
-            });
-            
-            const defaultVariation = variations[0] || { price: 0, stockQuantity: null, isStockManaged: false };
-            const imageId = itemData.imageIds ? itemData.imageIds[0] : null;
-            const imageUrl = imageId ? imageMap[imageId] : null;
-            
-            const linkedGroups = (itemData.modifierListInfo || [])
-                .map(info => {
-                    const baseGroup = modifierGroupMap[info.modifierListId];
-                    if (!baseGroup) return null;
-                    
-                    return {
-                        id: baseGroup.id,
-                        name: baseGroup.name,
-                        modifiers: baseGroup.modifiers,
-                        selectionType: (info.selectionType || baseGroup.selectionType) === 'SINGLE' ? 'single' : 'multiple',
-                        minSelections: info.minSelectedModifiers !== undefined ? info.minSelectedModifiers : null,
-                        maxSelections: info.maxSelectedModifiers !== undefined ? info.maxSelectedModifiers : null
-                    };
-                })
-                .filter(Boolean);
-
-            const isFeaturedCookie = (itemData.categories || []).some(cat => categoryMap[cat.id] === "Featured") || 
-                                     (categoryMap[itemData.categoryId] === "Featured");
-
-            return {
-                id: item.id,
-                name: itemData.name,
-                category: (itemData.categoryId || itemData.categories?.[0]?.id) ? (categoryMap[itemData.categoryId || itemData.categories?.[0]?.id] || "Other Cookies") : "Other Cookies",
-                subtitle: itemData.description || "Freshly baked",
-                price: defaultVariation.price,
-                imagePath: imageUrl,
-                description: itemData.description || "",
-                modifierGroups: linkedGroups.length > 0 ? linkedGroups : null,
-                isFeatured: isFeaturedCookie,
-                stockQuantity: defaultVariation.stockQuantity,
-                isStockManaged: defaultVariation.isStockManaged,
-                variations: variations
-            };
         });
         
         res.json(formattedItems);
@@ -199,7 +270,9 @@ app.post('/api/customer', async (req, res) => {
         const searchResult = await squareClient.customersApi.searchCustomers({
             query: {
                 filter: {
-                    emailAddress: { exact: email }
+                    emailAddress: {
+                        exact: email
+                    }
                 }
             }
         });
@@ -234,8 +307,7 @@ app.post('/api/customer', async (req, res) => {
         });
     }
 });
-
-// DISCOUNT CODE VALIDATION
+// DISCOUNT CODE VALIDATION ENDPOINT
 app.post('/api/validate-discount', async (req, res) => {
     try {
         const { discountCode, orderAmount } = req.body;
@@ -244,6 +316,9 @@ app.post('/api/validate-discount', async (req, res) => {
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
+        console.log(`🏷️  Validating discount code: ${discountCode} for order amount: $${orderAmount}`);
+
+        // Search for the discount in Square's catalog
         const { result } = await squareClient.catalogApi.searchCatalogObjects({
             objectTypes: ['DISCOUNT'],
             query: {
@@ -253,17 +328,26 @@ app.post('/api/validate-discount', async (req, res) => {
             }
         });
 
+        // Check if discount was found
         if (!result.objects || result.objects.length === 0) {
+            console.log(`❌ Discount code "${discountCode}" not found`);
             return res.status(404).json({ error: 'Discount code not found' });
         }
 
         const discount = result.objects[0];
         const discountData = discount.discountData;
 
+        console.log(`✅ Found discount: ${discountData.name}, Type: ${discountData.discountType}`);
+
+        // Handle different discount types
         if (discountData.discountType === 'FIXED_AMOUNT') {
+            // Fixed amount discount (e.g., $5 off)
             const discountAmountMoney = discountData.amountMoney;
-            const discountAmount = Number(discountAmountMoney.amount) / 100;
-            const finalDiscount = Math.min(discountAmount, orderAmount);
+            const discountAmount = Number(discountAmountMoney.amount) / 100; // Convert from cents
+
+            const finalDiscount = Math.min(discountAmount, orderAmount); // Don't exceed order total
+
+            console.log(`💰 Fixed amount discount: $${discountAmount} (applied: $${finalDiscount})`);
 
             return res.json({
                 valid: true,
@@ -272,8 +356,11 @@ app.post('/api/validate-discount', async (req, res) => {
                 discountValue: discountAmount
             });
         } else if (discountData.discountType === 'FIXED_PERCENTAGE') {
+            // Percentage discount (e.g., 20% off)
             const percentage = parseFloat(discountData.percentage);
             const discountAmount = (orderAmount * percentage) / 100;
+
+            console.log(`📊 Percentage discount: ${percentage}% (amount: $${discountAmount.toFixed(2)})`);
 
             return res.json({
                 valid: true,
@@ -282,6 +369,7 @@ app.post('/api/validate-discount', async (req, res) => {
                 discountPercentage: percentage
             });
         } else {
+            console.log(`⚠️  Unsupported discount type: ${discountData.discountType}`);
             return res.status(400).json({ error: 'Unsupported discount type' });
         }
     } catch (error) {
@@ -293,7 +381,6 @@ app.post('/api/validate-discount', async (req, res) => {
     }
 });
 
-// ORDERS
 app.get('/api/orders/active', async (req, res) => {
     try {
         const customerId = req.query.customerId;
@@ -306,8 +393,12 @@ app.get('/api/orders/active', async (req, res) => {
             locationIds: [process.env.SQUARE_LOCATION_ID],
             query: {
                 filter: {
-                    customerFilter: { customerIds: [customerId] },
-                    stateFilter: { states: ['OPEN'] },
+                    customerFilter: {
+                        customerIds: [customerId]
+                    },
+                    stateFilter: {
+                        states: ['OPEN']
+                    },
                     dateTimeFilter: {
                         createdAt: {
                             startAt: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString()
@@ -324,30 +415,33 @@ app.get('/api/orders/active', async (req, res) => {
 
         const orders = (result.orders || [])
             .filter(order => {
+                // 1. Check if it has fulfillments at all
                 if (!order.fulfillments || order.fulfillments.length === 0) return false;
+                
+                // 2. Make sure the fulfillment hasn't already been completed/canceled on the POS
                 return order.fulfillments.some(f => f.state !== 'COMPLETED' && f.state !== 'CANCELED');
             })
             .map(order => ({
-                id: order.id,
-                locationId: order.locationId,
-                createdAt: order.createdAt,
-                updatedAt: order.updatedAt,
-                state: order.state,
-                totalMoney: {
-                    amount: Number(order.totalMoney.amount),
-                    currency: order.totalMoney.currency
-                },
-                lineItems: order.lineItems?.map(item => ({
-                    uid: item.uid,
-                    name: item.name,
-                    quantity: item.quantity,
-                    basePriceMoney: item.basePriceMoney ? {
-                        amount: Number(item.basePriceMoney.amount),
-                        currency: item.basePriceMoney.currency
-                    } : null
-                })),
-                fulfillments: order.fulfillments
-            }));
+            id: order.id,
+            locationId: order.locationId,
+            createdAt: order.createdAt,
+            updatedAt: order.updatedAt,
+            state: order.state,
+            totalMoney: {
+                amount: Number(order.totalMoney.amount), // ← Convert BigInt to Number
+                currency: order.totalMoney.currency
+            },
+            lineItems: order.lineItems?.map(item => ({
+                uid: item.uid,
+                name: item.name,
+                quantity: item.quantity,
+                basePriceMoney: item.basePriceMoney ? {
+                    amount: Number(item.basePriceMoney.amount), // ← Convert BigInt
+                    currency: item.basePriceMoney.currency
+                } : null
+            })),
+            fulfillments: order.fulfillments
+        }));
 
         res.json(orders);
     } catch (error) {
@@ -371,8 +465,12 @@ app.get('/api/orders/past', async (req, res) => {
             locationIds: [process.env.SQUARE_LOCATION_ID],
             query: {
                 filter: {
-                    customerFilter: { customerIds: [customerId] },
-                    stateFilter: { states: ['COMPLETED', 'CANCELED'] },
+                    customerFilter: {
+                        customerIds: [customerId]
+                    },
+                    stateFilter: {
+                        states: ['COMPLETED', 'CANCELED']
+                    },
                     dateTimeFilter: {
                         createdAt: {
                             startAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
@@ -419,196 +517,6 @@ app.get('/api/orders/past', async (req, res) => {
     }
 });
 
-// DEBUG ORDERS - FIX UTC CONVERSION
-app.get('/api/debug-orders', async (req, res) => {
-    try {
-        const locationTimezone = 'America/Chicago';
-        const futureDate = moment().add(7, 'days').toDate();
-        
-        const allOrdersResult = await squareClient.ordersApi.searchOrders({
-            locationIds: [process.env.SQUARE_LOCATION_ID],
-            query: {
-                filter: {
-                    dateTimeFilter: {
-                        createdAt: {
-                            startAt: moment().subtract(1, 'day').toISOString(),
-                            endAt: futureDate.toISOString()
-                        }
-                    }
-                }
-            },
-            limit: 100
-        });
-        
-        const orderDetails = [];
-        
-        if (allOrdersResult.result.orders) {
-            allOrdersResult.result.orders.forEach((order, idx) => {
-                const detail = {
-                    id: order.id.substring(0, 12),
-                    state: order.state,
-                    createdAt: order.createdAt,
-                    fulfillments: []
-                };
-                
-                if (order.fulfillments) {
-                    order.fulfillments.forEach((f, fIdx) => {
-                        const fDetail = {
-                            type: f.type,
-                            state: f.state
-                        };
-                        
-                        if (f.pickupDetails && f.pickupDetails.pickupAt) {
-                            // ✅ FIX: Convert UTC to Central Time
-                            const pickupMoment = moment(f.pickupDetails.pickupAt).tz(locationTimezone);
-                            
-                            fDetail.pickupDetails = {
-                                scheduleType: f.pickupDetails.scheduleType,
-                                pickupAtUTC: f.pickupDetails.pickupAt,
-                                pickupAtCentral: pickupMoment.format('ddd M/D h:mm A')
-                            };
-                        }
-                        
-                        detail.fulfillments.push(fDetail);
-                    });
-                }
-                
-                orderDetails.push(detail);
-            });
-        }
-        
-        res.json({
-            totalOrders: allOrdersResult.result.orders?.length || 0,
-            orders: orderDetails
-        });
-        
-    } catch (error) {
-        console.error('❌ Error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// CALCULATE IMMEDIATE PICKUP - FIX WINDOW CHECK
-app.get('/api/calculate-immediate-pickup', async (req, res) => {
-    try {
-        const locationTimezone = 'America/Chicago';
-        const now = moment().tz(locationTimezone);
-        const minPrepTimeMinutes = 35;
-        const maxOrdersPerWindow = 2;
-        const slotInterval = 5;
-        
-        const locationResult = await squareClient.locationsApi.retrieveLocation(process.env.SQUARE_LOCATION_ID);
-        const businessHours = locationResult.result.location.businessHours?.periods || [];
-        
-        if (businessHours.length === 0) {
-            return res.status(400).json({ error: 'Store is currently closed' });
-        }
-        
-        const futureDate = moment().add(7, 'days').toDate();
-        const ordersResult = await squareClient.ordersApi.searchOrders({
-            locationIds: [process.env.SQUARE_LOCATION_ID],
-            query: {
-                filter: {
-                    stateFilter: { states: ['OPEN', 'DRAFT'] },
-                    dateTimeFilter: {
-                        createdAt: {
-                            startAt: moment().toISOString(),
-                            endAt: futureDate.toISOString()
-                        }
-                    }
-                }
-            },
-            limit: 500
-        });
-        
-        // ✅ Build slot map - CONVERT UTC TO CENTRAL FIRST
-        const ordersBySlot = {};
-        if (ordersResult.result.orders) {
-            ordersResult.result.orders.forEach((order) => {
-                if (order.fulfillments?.[0]?.pickupDetails?.pickupAt) {
-                    const pickupAt = order.fulfillments[0].pickupDetails.pickupAt;
-                    const pickupTime = moment(pickupAt).tz(locationTimezone);
-                    
-                    const roundedMinute = Math.floor(pickupTime.minute() / 5) * 5;
-                    pickupTime.minute(roundedMinute).second(0).millisecond(0);
-                    
-                    const slotKey = pickupTime.toISOString();
-                    ordersBySlot[slotKey] = (ordersBySlot[slotKey] || 0) + 1;
-                    
-                    console.log(`   Order: ${pickupTime.format('M/D h:mm A')} → Count: ${ordersBySlot[slotKey]}`);
-                }
-            });
-        }
-        
-        console.log('📊 Total slots with orders:', Object.keys(ordersBySlot).length);
-        
-        let candidateTime = now.clone().add(minPrepTimeMinutes, 'minutes');
-        const currentMinute = candidateTime.minute();
-        const roundedMinute = Math.ceil(currentMinute / slotInterval) * slotInterval;
-        candidateTime.minute(roundedMinute).second(0).millisecond(0);
-        
-        let iterations = 0;
-        const maxIterations = 500;
-        
-        while (iterations < maxIterations) {
-            iterations++;
-            
-            const dayOfWeek = candidateTime.format('ddd').toUpperCase();
-            const candidateMinutes = candidateTime.hour() * 60 + candidateTime.minute();
-            
-            let isWithinHours = false;
-            for (const period of businessHours) {
-                if (period.dayOfWeek !== dayOfWeek) continue;
-                
-                const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
-                const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
-                const startMinutes = startHour * 60 + startMin;
-                const endMinutes = endHour * 60 + endMin;
-                
-                if (candidateMinutes >= startMinutes && candidateMinutes < endMinutes) {
-                    if (candidateMinutes - startMinutes >= minPrepTimeMinutes) {
-                        isWithinHours = true;
-                        break;
-                    }
-                }
-            }
-            
-            if (isWithinHours) {
-                // ✅ FIX: Check FORWARD window (current + next 2 slots)
-                const slot0 = candidateTime.clone().toISOString();
-                const slot1 = candidateTime.clone().add(5, 'minutes').toISOString();
-                const slot2 = candidateTime.clone().add(10, 'minutes').toISOString();
-                
-                const count0 = ordersBySlot[slot0] || 0;
-                const count1 = ordersBySlot[slot1] || 0;
-                const count2 = ordersBySlot[slot2] || 0;
-                const totalOrders = count0 + count1 + count2;
-                
-                console.log(`🔍 ${candidateTime.format('h:mm A')}: ${count0}+${count1}+${count2}=${totalOrders}/${maxOrdersPerWindow}`);
-                
-                if (totalOrders < maxOrdersPerWindow) {
-                    console.log(`✅ FOUND: ${candidateTime.format('ddd M/D h:mm A')}`);
-                    
-                    return res.json({
-                        readyTime: candidateTime.toISOString(),
-                        prepTimeMinutes: minPrepTimeMinutes,
-                        slotInterval: slotInterval
-                    });
-                }
-            }
-            
-            candidateTime.add(slotInterval, 'minutes');
-        }
-        
-        return res.status(400).json({ error: 'No available pickup times' });
-        
-    } catch (error) {
-        console.error('❌ Error:', error);
-        return res.status(500).json({ error: 'Failed to calculate pickup time', details: error.message });
-    }
-});
-
-// AVAILABLE PICKUP TIMES - 15-MIN INTERVALS
 app.get('/api/available-pickup-times', async (req, res) => {
     try {
         const locationTimezone = 'America/Chicago';
@@ -642,7 +550,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
             limit: 500
         });
         
-        // ✅ Build 5-min slot map
+        // Build 5-min slot map with UTC->Central conversion
         const ordersBySlot = {};
         if (ordersResult.result.orders) {
             ordersResult.result.orders.forEach(order => {
@@ -659,7 +567,7 @@ app.get('/api/available-pickup-times', async (req, res) => {
             });
         }
         
-        // ✅ Check 15-min window (3 consecutive 5-min slots)
+        // Check if 15-min window is available
         function canBook15MinSlot(time) {
             const slot0 = time.clone();
             const slot1 = time.clone().add(5, 'minutes');
@@ -702,7 +610,8 @@ app.get('/api/available-pickup-times', async (req, res) => {
                         const minutesSinceOpening = currentMinutes - startMinutes;
                         
                         if (minutesSinceOpening >= minPrepTimeMinutes) {
-                            if (canBook15MinSlot(currentSlot)) {
+                            const remainder = currentSlot.minute() % 15;
+                            if (remainder === 0 && canBook15MinSlot(currentSlot)) {
                                 availableSlots.push({ time: currentSlot.toISOString() });
                             }
                             foundValidSlot = true;
@@ -737,23 +646,581 @@ app.get('/api/available-pickup-times', async (req, res) => {
     }
 });
 
-// DELIVERY AVAILABILITY
-app.get('/api/delivery-availability', async (req, res) => {
+// ADD THIS DIAGNOSTIC ENDPOINT to your server.js
+app.get('/api/debug-orders', async (req, res) => {
+    try {
+        console.log('🔍 DEBUGGING ALL ORDERS');
+        
+        const futureDate = moment().add(7, 'days').toDate();
+        
+        // Get ALL orders (not just OPEN)
+        const allOrdersResult = await squareClient.ordersApi.searchOrders({
+            locationIds: [process.env.SQUARE_LOCATION_ID],
+            query: {
+                filter: {
+                    dateTimeFilter: {
+                        createdAt: {
+                            startAt: moment().subtract(1, 'day').toISOString(), // Last 24 hours
+                            endAt: futureDate.toISOString()
+                        }
+                    }
+                }
+            },
+            limit: 100
+        });
+        
+        console.log(`📦 Total orders found: ${allOrdersResult.result.orders?.length || 0}`);
+        
+        const orderDetails = [];
+        
+        if (allOrdersResult.result.orders) {
+            allOrdersResult.result.orders.forEach((order, idx) => {
+                console.log(`\n--- ORDER ${idx + 1} ---`);
+                console.log(`ID: ${order.id}`);
+                console.log(`State: ${order.state}`);
+                console.log(`Created: ${order.createdAt}`);
+                console.log(`Fulfillments: ${order.fulfillments?.length || 0}`);
+                
+                const detail = {
+                    id: order.id.substring(0, 12),
+                    state: order.state,
+                    createdAt: order.createdAt,
+                    fulfillments: []
+                };
+                
+                if (order.fulfillments) {
+                    order.fulfillments.forEach((f, fIdx) => {
+                        console.log(`  Fulfillment ${fIdx + 1}:`);
+                        console.log(`    Type: ${f.type}`);
+                        console.log(`    State: ${f.state}`);
+                        
+                        const fDetail = {
+                            type: f.type,
+                            state: f.state
+                        };
+                        
+                        if (f.pickupDetails) {
+                            console.log(`    Pickup Details:`);
+                            console.log(`      Schedule Type: ${f.pickupDetails.scheduleType}`);
+                            console.log(`      Pickup At: ${f.pickupDetails.pickupAt || 'NOT SET'}`);
+                            
+                            fDetail.pickupDetails = {
+                                scheduleType: f.pickupDetails.scheduleType,
+                                pickupAt: f.pickupDetails.pickupAt
+                            };
+                            
+                            if (f.pickupDetails.pickupAt) {
+                                const pickupMoment = moment(f.pickupDetails.pickupAt);
+                                console.log(`      Pickup At (formatted): ${pickupMoment.format('ddd M/D h:mm A')}`);
+                                fDetail.pickupDetails.pickupAtFormatted = pickupMoment.format('ddd M/D h:mm A');
+                            }
+                        }
+                        
+                        detail.fulfillments.push(fDetail);
+                    });
+                }
+                
+                orderDetails.push(detail);
+            });
+        }
+        
+        res.json({
+            totalOrders: allOrdersResult.result.orders?.length || 0,
+            orders: orderDetails,
+            searchCriteria: {
+                locationId: process.env.SQUARE_LOCATION_ID,
+                startDate: moment().subtract(1, 'day').format('M/D/YYYY h:mm A'),
+                endDate: moment().add(7, 'days').format('M/D/YYYY h:mm A')
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// CALCULATE IMMEDIATE PICKUP TIME (Find first available slot respecting 15-min window)
+app.get('/api/calculate-immediate-pickup', async (req, res) => {
     try {
         const locationTimezone = 'America/Chicago';
         const now = moment().tz(locationTimezone);
-        const deliveryEnabled = process.env.DELIVERY_ENABLED === 'true';
-        const deliveryFee = parseFloat(process.env.DELIVERY_FEE) || 5.00;
         const minPrepTimeMinutes = 35;
-        const deliveryMinTime = 5;
-        const deliveryMaxTime = 15;
-        
-        if (!deliveryEnabled) {
-            return res.json({ available: false, reason: 'Delivery is not currently available' });
-        }
+        const maxOrdersPerWindow = 2;
+        const slotInterval = 5;
         
         const locationResult = await squareClient.locationsApi.retrieveLocation(process.env.SQUARE_LOCATION_ID);
         const businessHours = locationResult.result.location.businessHours?.periods || [];
         
         if (businessHours.length === 0) {
-            return res.json({ available: false, reason: 'Store is currently closed' });
+            return res.status(400).json({ error: 'Store is currently closed' });
+        }
+        
+        const futureDate = moment().add(7, 'days').toDate();
+        const ordersResult = await squareClient.ordersApi.searchOrders({
+            locationIds: [process.env.SQUARE_LOCATION_ID],
+            query: {
+                filter: {
+                    stateFilter: { states: ['OPEN', 'DRAFT'] },
+                    dateTimeFilter: {
+                        createdAt: {
+                            startAt: moment().toISOString(),
+                            endAt: futureDate.toISOString()
+                        }
+                    }
+                }
+            },
+            limit: 500
+        });
+        
+        // Convert UTC to Central, round to 5-min slots
+        const ordersBySlot = {};
+        if (ordersResult.result.orders) {
+            ordersResult.result.orders.forEach((order) => {
+                if (order.fulfillments?.[0]?.pickupDetails?.pickupAt) {
+                    const pickupAt = order.fulfillments[0].pickupDetails.pickupAt;
+                    const pickupTime = moment(pickupAt).tz(locationTimezone);
+                    
+                    const roundedMinute = Math.floor(pickupTime.minute() / 5) * 5;
+                    pickupTime.minute(roundedMinute).second(0).millisecond(0);
+                    
+                    const slotKey = pickupTime.toISOString();
+                    ordersBySlot[slotKey] = (ordersBySlot[slotKey] || 0) + 1;
+                }
+            });
+        }
+        
+        let candidateTime = now.clone().add(minPrepTimeMinutes, 'minutes');
+        const currentMinute = candidateTime.minute();
+        const roundedMinute = Math.ceil(currentMinute / slotInterval) * slotInterval;
+        candidateTime.minute(roundedMinute).second(0).millisecond(0);
+        
+        let iterations = 0;
+        const maxIterations = 500;
+        
+        while (iterations < maxIterations) {
+            iterations++;
+            
+            const dayOfWeek = candidateTime.format('ddd').toUpperCase();
+            const candidateMinutes = candidateTime.hour() * 60 + candidateTime.minute();
+            
+            let isWithinHours = false;
+            for (const period of businessHours) {
+                if (period.dayOfWeek !== dayOfWeek) continue;
+                
+                const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
+                const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
+                const startMinutes = startHour * 60 + startMin;
+                const endMinutes = endHour * 60 + endMin;
+                
+                if (candidateMinutes >= startMinutes && candidateMinutes < endMinutes) {
+                    if (candidateMinutes - startMinutes >= minPrepTimeMinutes) {
+                        isWithinHours = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (isWithinHours) {
+                // Check FORWARD window: current slot + next 2 slots (15-min total)
+                const slot0 = candidateTime.clone().toISOString();
+                const slot1 = candidateTime.clone().add(5, 'minutes').toISOString();
+                const slot2 = candidateTime.clone().add(10, 'minutes').toISOString();
+                
+                const count0 = ordersBySlot[slot0] || 0;
+                const count1 = ordersBySlot[slot1] || 0;
+                const count2 = ordersBySlot[slot2] || 0;
+                const totalOrders = count0 + count1 + count2;
+                
+                console.log(`🔍 ${candidateTime.format('h:mm A')}: ${count0}+${count1}+${count2}=${totalOrders}/${maxOrdersPerWindow}`);
+                
+                if (totalOrders < maxOrdersPerWindow) {
+                    console.log(`✅ FOUND: ${candidateTime.format('ddd M/D h:mm A')}`);
+                    return res.json({
+                        readyTime: candidateTime.toISOString(),
+                        prepTimeMinutes: minPrepTimeMinutes,
+                        slotInterval: slotInterval
+                    });
+                }
+            }
+            
+            candidateTime.add(slotInterval, 'minutes');
+        }
+        
+        return res.status(400).json({ error: 'No available pickup times' });
+        
+    } catch (error) {
+        console.error('❌ Error:', error);
+        return res.status(500).json({ error: 'Failed to calculate pickup time', details: error.message });
+    }
+});
+// CALCULATE DELIVERY TIME AND CHECK AVAILABILITY
+app.get('/api/delivery-availability', async (req, res) => {
+    try {
+        const locationTimezone = 'America/Chicago';
+        const now = moment().tz(locationTimezone);
+        
+        // Configuration (use env vars with fallbacks)
+        const deliveryEnabled = process.env.DELIVERY_ENABLED === 'true';
+        const deliveryFee = parseFloat(process.env.DELIVERY_FEE) || 5.00;
+        const minPrepTimeMinutes = parseInt(process.env.MIN_PREP_TIME_MINUTES) || 35;
+        const deliveryMinTime = parseInt(process.env.DELIVERY_MIN_TIME) || 5;
+        const deliveryMaxTime = parseInt(process.env.DELIVERY_MAX_TIME) || 15;
+        
+        console.log('🚗 Checking delivery availability');
+        console.log('   Delivery enabled?', deliveryEnabled);
+        console.log('   Current time:', now.format('M/D/YYYY, h:mm:ss A'));
+        
+        if (!deliveryEnabled) {
+            console.log('❌ Delivery is currently disabled');
+            return res.json({
+                available: false,
+                reason: 'Delivery is not currently available'
+            });
+        }
+        
+        // Get location and business hours
+        const locationResult = await squareClient.locationsApi.retrieveLocation(
+            process.env.SQUARE_LOCATION_ID
+        );
+        
+        const location = locationResult.result.location;
+        const businessHours = location.businessHours?.periods || [];
+        
+        if (businessHours.length === 0) {
+            console.log('❌ Store is currently closed');
+            return res.json({
+                available: false,
+                reason: 'Store is currently closed'
+            });
+        }
+        
+        // Check if store is open now
+        const dayOfWeek = now.format('ddd').toUpperCase();
+        const currentMinutes = now.hour() * 60 + now.minute();
+        
+        const dayPeriods = businessHours.filter(period => period.dayOfWeek === dayOfWeek);
+        let isOpen = false;
+        
+        for (const period of dayPeriods) {
+            const [startHour, startMin] = period.startLocalTime.split(':').map(Number);
+            const [endHour, endMin] = period.endLocalTime.split(':').map(Number);
+            
+            const startMinutes = startHour * 60 + startMin;
+            const endMinutes = endHour * 60 + endMin;
+            
+            if (currentMinutes >= startMinutes && currentMinutes < endMinutes) {
+                isOpen = true;
+                break;
+            }
+        }
+        
+        if (!isOpen) {
+            console.log('❌ Store is not currently open');
+            return res.json({
+                available: false,
+                reason: 'Store is not currently open for delivery'
+            });
+        }
+        
+        // Calculate delivery window
+        // Start = now + prep time + min delivery time
+        // End = now + prep time + max delivery time
+        const totalMinTime = minPrepTimeMinutes + deliveryMinTime;
+        const totalMaxTime = minPrepTimeMinutes + deliveryMaxTime;
+        
+        const deliveryStart = now.clone().add(totalMinTime, 'minutes');
+        const deliveryEnd = now.clone().add(totalMaxTime, 'minutes');
+        
+        console.log('✅ Delivery available');
+        console.log('   Prep time:', minPrepTimeMinutes, 'minutes');
+        console.log('   Delivery time:', deliveryMinTime, '-', deliveryMaxTime, 'minutes');
+        console.log('   Total time:', totalMinTime, '-', totalMaxTime, 'minutes');
+        console.log('   Delivery window:', deliveryStart.format('h:mm A'), '-', deliveryEnd.format('h:mm A'));
+        
+        res.json({
+            available: true,
+            deliveryFee: deliveryFee,
+            estimatedMinutes: {
+                min: totalMinTime,
+                max: totalMaxTime
+            },
+            deliveryStart: deliveryStart.toISOString(),
+            deliveryEnd: deliveryEnd.toISOString(),
+            deliveryFeeFormatted: `$${deliveryFee.toFixed(2)}`
+        });
+        
+    } catch (error) {
+        console.error('❌ Error checking delivery availability:', error);
+        res.status(500).json({
+            available: false,
+            reason: 'Failed to check delivery availability',
+            details: error.message
+        });
+    }
+});
+
+// TEST: Check what fulfillment options Square provides
+app.get('/api/test-square-fulfillment', async (req, res) => {
+    try {
+        console.log('🔍 Checking Square location for fulfillment settings...');
+        
+        const locationResult = await squareClient.locationsApi.retrieveLocation(
+            process.env.SQUARE_LOCATION_ID
+        );
+        
+        const location = locationResult.result.location;
+        
+        console.log('📋 Full location object:', JSON.stringify(location, null, 2));
+        
+        res.json({
+            locationId: location.id,
+            name: location.name,
+            capabilities: location.capabilities,
+            status: location.status,
+            businessHours: location.businessHours,
+            // Look for any fulfillment-related fields
+            allFields: Object.keys(location)
+        });
+        
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({
+            error: 'Failed to check location',
+            details: error.message
+        });
+    }
+});
+
+// PAYMENT PROCESSING ENDPOINT
+app.post('/api/process-payment', async (req, res) => {
+    try {
+        const { 
+            nonce, 
+            amount, 
+            customerId, 
+            customerEmail,
+            customerName,
+            customerPhone,
+            pickupAt, 
+            discountCode, 
+            items,
+            fulfillmentType,
+            deliveryAddress,
+            deliveryInstructions
+        } = req.body;
+
+        console.log('💳 Processing payment...');
+        console.log('   Amount:', amount);
+        console.log('   Customer:', customerId);
+        console.log('   Fulfillment type:', fulfillmentType || 'pickup');
+        console.log('   Pickup:', pickupAt);
+        console.log('   Delivery address:', deliveryAddress);
+        console.log('   Discount:', discountCode || 'None');
+        console.log('   Items:', items?.length || 0);
+
+        if (!nonce || amount === undefined || amount === null || !customerId || !items || items.length === 0) {
+            console.log('❌ Missing fields:', { nonce: !!nonce, amount, customerId: !!customerId, itemCount: items?.length });
+            return res.status(400).json({ error: 'Missing required payment fields' });
+        }
+
+        // Generate unique idempotency keys
+        const { randomUUID } = require('crypto');
+        const orderIdempotencyKey = randomUUID();
+        const paymentIdempotencyKey = randomUUID();
+
+        // Get discount catalog ID if discount code provided
+        let discountCatalogId = null;
+        if (discountCode) {
+            try {
+                const discountResult = await squareClient.catalogApi.searchCatalogObjects({
+                    objectTypes: ['DISCOUNT'],
+                    query: {
+                        textQuery: {
+                            keywords: [discountCode.toUpperCase()]
+                        }
+                    }
+                });
+
+                if (discountResult.result.objects && discountResult.result.objects.length > 0) {
+                    discountCatalogId = discountResult.result.objects[0].id;
+                    console.log(`🏷️  Applying discount: ${discountCode} (${discountCatalogId})`);
+                }
+            } catch (discountError) {
+                console.warn('⚠️  Could not apply discount:', discountError.message);
+            }
+        }
+
+// Build line items from cart
+const lineItems = items.map((item, index) => {
+    console.log(`   Building line item ${index + 1}: ${item.name} x${item.quantity}`);
+    
+    // IMPORTANT: Use variationId as the main catalog object (not as a note!)
+    // Square's variations include the dough type, and Square will display it properly
+    const catalogId = item.variationId || item.catalogObjectId;
+    console.log(`   Using catalog ID: ${catalogId}${item.variationId ? ' (variation)' : ' (item)'}`);
+    
+    const lineItem = {
+        catalogObjectId: catalogId,  // ← This points to the specific variation
+        quantity: String(item.quantity)
+        // DO NOT include basePriceMoney - Square pulls price from catalog
+        // DO NOT add variation as a note - Square handles it automatically
+    };
+
+    // Add modifiers if present
+    if (item.modifiers && item.modifiers.length > 0) {
+        console.log(`      ↳ Adding ${item.modifiers.length} modifiers`);
+        lineItem.modifiers = item.modifiers.map(mod => ({
+            catalogObjectId: mod.id,  // ← Modifier's catalog ID
+            quantity: String(mod.quantity || 1)
+            // DO NOT include basePriceMoney for modifiers either
+        }));
+    }
+
+    return lineItem;
+});
+        console.log(`📦 Creating order with ${lineItems.length} line items...`);
+
+        // Prepare fulfillment based on type
+        let fulfillments = undefined;
+        
+        if (fulfillmentType === 'delivery') {
+            console.log('🚗 Creating delivery fulfillment');
+            fulfillments = [{
+                type: 'DELIVERY',
+                state: 'PROPOSED',
+                deliveryDetails: {
+                    scheduleType: 'ASAP',
+                    recipient: {
+                        customerId: customerId,
+                        displayName: customerName || 'Customer',
+                        phoneNumber: customerPhone,
+                        address: {
+                            addressLine1: deliveryAddress?.street,
+                            addressLine2: deliveryAddress?.apt || undefined,
+                            locality: deliveryAddress?.city,
+                            administrativeDistrictLevel1: deliveryAddress?.state,
+                            postalCode: deliveryAddress?.zip
+                        }
+                    },
+                    note: deliveryInstructions || undefined
+                }
+            }];
+        } else if (pickupAt) {
+            console.log('📍 Creating pickup fulfillment');
+            fulfillments = [{
+                type: 'PICKUP',
+                state: 'PROPOSED',
+                pickupDetails: {
+                    scheduleType: 'SCHEDULED',
+                    pickupAt: pickupAt,
+                    recipient: {
+                        customerId: customerId
+                    }
+                }
+            }];
+        }
+
+        // Prepare order object
+        const orderRequest = {
+            idempotencyKey: orderIdempotencyKey,
+            order: {
+                locationId: process.env.SQUARE_LOCATION_ID,
+                customerId: customerId,
+                lineItems: lineItems,
+                discounts: discountCatalogId ? [{
+                    catalogObjectId: discountCatalogId,
+                    scope: 'ORDER'
+                }] : undefined,
+                fulfillments: fulfillments
+            }
+        };
+
+        console.log('📤 Creating order in Square...');
+        const { result: orderResult } = await squareClient.ordersApi.createOrder(orderRequest);
+        console.log('✅ Order created in Square!');
+        console.log('   Order ID:', orderResult.order.id);
+        console.log('   Order total after discount:', Number(orderResult.order.totalMoney.amount) / 100);
+
+        // Check if this is a free order (100% discount)
+        const orderTotal = Number(orderResult.order.totalMoney.amount);
+        
+        if (orderTotal === 0) {
+            console.log('🎁 Free order detected - completing order without payment');
+            
+            try {
+                const payOrderResult = await squareClient.ordersApi.payOrder(orderResult.order.id, {
+                    idempotencyKey: paymentIdempotencyKey,
+                    orderVersion: orderResult.order.version
+                });
+                
+                console.log('✅ Free order marked as paid in Square');
+                console.log('   Order state:', payOrderResult.result.order.state);
+                
+                return res.json({
+                    success: true,
+                    orderId: payOrderResult.result.order.id,
+                    paymentId: null,
+                    totalMoney: payOrderResult.result.order.totalMoney,
+                    isFreeOrder: true
+                });
+            } catch (payError) {
+                console.error('❌ Failed to mark free order as paid:', payError.message);
+                return res.json({
+                    success: true,
+                    orderId: orderResult.order.id,
+                    paymentId: null,
+                    totalMoney: orderResult.order.totalMoney,
+                    isFreeOrder: true,
+                    warning: 'Order created but not marked as complete'
+                });
+            }
+        }
+
+        // For paid orders, create the payment
+        const paymentRequest = {
+            idempotencyKey: paymentIdempotencyKey,
+            sourceId: nonce,
+            amountMoney: {
+                amount: BigInt(orderTotal),
+                currency: 'USD'
+            },
+            customerId: customerId,
+            orderId: orderResult.order.id
+        };
+
+        console.log('💰 Creating payment for $' + (orderTotal / 100));
+        const { result: paymentResult } = await squareClient.paymentsApi.createPayment(paymentRequest);
+        console.log('✅ Payment successful!');
+        console.log('   Payment ID:', paymentResult.payment.id);
+
+        res.json({
+            success: true,
+            orderId: orderResult.order.id,
+            paymentId: paymentResult.payment.id,
+            totalMoney: orderResult.order.totalMoney,
+            isFreeOrder: false
+        });
+
+    } catch (error) {
+        console.error('❌ Payment processing error:');
+        console.error('   Message:', error.message);
+        console.error('   Stack:', error.stack);
+        
+        if (error.errors) {
+            console.error('   Square errors:', JSON.stringify(error.errors, null, 2));
+        }
+        
+        res.status(500).json({ 
+            error: 'Payment failed',
+            details: error.message,
+            squareErrors: error.errors || []
+        });
+    }
+});
+
+// START SERVER
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Cookie Runner backend is live on http://localhost:${PORT}`);
+});
