@@ -59,7 +59,7 @@ async function buildSharedTimeline(squareClient, locationId, businessHours, loca
         locationIds: [locationId],
         query: {
             filter: {
-                stateFilter: { states: ['OPEN'] },
+                stateFilter: { states: ['OPEN', 'DRAFT'] },
                 dateTimeFilter: {
                     createdAt: {
                         startAt: moment().subtract(14, 'days').toISOString(),
@@ -481,7 +481,7 @@ app.get('/api/orders/active', async (req, res) => {
                         customerIds: [customerId]
                     },
                     stateFilter: {
-                        states: ['OPEN']
+                        states: ['OPEN', 'DRAFT']
                     },
                     dateTimeFilter: {
                         createdAt: {
