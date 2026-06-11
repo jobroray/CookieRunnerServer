@@ -709,6 +709,100 @@ app.get('/api/available-pickup-times', async (req, res) => {
     }
 });
 
+// ADD THIS DIAGNOSTIC ENDPOINT to your server.js
+app.get('/api/debug-orders', async (req, res) => {
+    try {
+        console.log('🔍 DEBUGGING ALL ORDERS');
+        
+        const futureDate = moment().add(7, 'days').toDate();
+        
+        // Get ALL orders (not just OPEN)
+        const allOrdersResult = await squareClient.ordersApi.searchOrders({
+            locationIds: [process.env.SQUARE_LOCATION_ID],
+            query: {
+                filter: {
+                    dateTimeFilter: {
+                        createdAt: {
+                            startAt: moment().subtract(1, 'day').toISOString(), // Last 24 hours
+                            endAt: futureDate.toISOString()
+                        }
+                    }
+                }
+            },
+            limit: 100
+        });
+        
+        console.log(`📦 Total orders found: ${allOrdersResult.result.orders?.length || 0}`);
+        
+        const orderDetails = [];
+        
+        if (allOrdersResult.result.orders) {
+            allOrdersResult.result.orders.forEach((order, idx) => {
+                console.log(`\n--- ORDER ${idx + 1} ---`);
+                console.log(`ID: ${order.id}`);
+                console.log(`State: ${order.state}`);
+                console.log(`Created: ${order.createdAt}`);
+                console.log(`Fulfillments: ${order.fulfillments?.length || 0}`);
+                
+                const detail = {
+                    id: order.id.substring(0, 12),
+                    state: order.state,
+                    createdAt: order.createdAt,
+                    fulfillments: []
+                };
+                
+                if (order.fulfillments) {
+                    order.fulfillments.forEach((f, fIdx) => {
+                        console.log(`  Fulfillment ${fIdx + 1}:`);
+                        console.log(`    Type: ${f.type}`);
+                        console.log(`    State: ${f.state}`);
+                        
+                        const fDetail = {
+                            type: f.type,
+                            state: f.state
+                        };
+                        
+                        if (f.pickupDetails) {
+                            console.log(`    Pickup Details:`);
+                            console.log(`      Schedule Type: ${f.pickupDetails.scheduleType}`);
+                            console.log(`      Pickup At: ${f.pickupDetails.pickupAt || 'NOT SET'}`);
+                            
+                            fDetail.pickupDetails = {
+                                scheduleType: f.pickupDetails.scheduleType,
+                                pickupAt: f.pickupDetails.pickupAt
+                            };
+                            
+                            if (f.pickupDetails.pickupAt) {
+                                const pickupMoment = moment(f.pickupDetails.pickupAt);
+                                console.log(`      Pickup At (formatted): ${pickupMoment.format('ddd M/D h:mm A')}`);
+                                fDetail.pickupDetails.pickupAtFormatted = pickupMoment.format('ddd M/D h:mm A');
+                            }
+                        }
+                        
+                        detail.fulfillments.push(fDetail);
+                    });
+                }
+                
+                orderDetails.push(detail);
+            });
+        }
+        
+        res.json({
+            totalOrders: allOrdersResult.result.orders?.length || 0,
+            orders: orderDetails,
+            searchCriteria: {
+                locationId: process.env.SQUARE_LOCATION_ID,
+                startDate: moment().subtract(1, 'day').format('M/D/YYYY h:mm A'),
+                endDate: moment().add(7, 'days').format('M/D/YYYY h:mm A')
+            }
+        });
+        
+    } catch (error) {
+        console.error('❌ Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // CALCULATE IMMEDIATE PICKUP TIME (Find first available slot respecting 15-min window)
 app.get('/api/calculate-immediate-pickup', async (req, res) => {
     try {
